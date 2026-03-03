@@ -2,4 +2,4 @@ streamlit
 pandas
 plotly
 yfinance==0.2.37
-streamlit-gsheets
+st-gsheets-connection
