@@ -8,40 +8,46 @@ import hashlib
 
 st.set_page_config(page_title="Finans Pro", layout="wide", page_icon="🏦")
 
-# --- ÖZEL CSS GRID VE KART TASARIMI ---
+# --- CSS ---
 st.markdown("""
     <style>
     .metric-container {
         display: grid;
-        grid-template-columns: repeat(4, 1fr); /* Zorunlu 4 sütun */
+        grid-template-columns: repeat(4, 1fr);
         gap: 10px;
         margin-bottom: 20px;
     }
     .metric-card {
-        padding: 12px 5px; /* Padding daraltıldı */
+        padding: 12px 5px;
         border-radius: 10px;
         text-align: center;
         color: white;
         box-shadow: 2px 2px 8px rgba(0,0,0,0.1);
     }
-    .metric-card .icon { font-size: 22px; margin-bottom: 2px; } /* İkon küçültüldü */
-    .metric-card .title { font-size: 13px; opacity: 0.8; font-weight: 400; } /* Font küçültüldü */
-    .metric-card .value { font-size: 16px; font-weight: 700; margin: 2px 0; } /* Font küçültüldü */
-    .metric-card .delta { font-size: 11px; opacity: 0.7; } /* Font küçültüldü */
-    
-    /* Mobil uyum için ufak bir esneklik */
+    .metric-card .icon { font-size: 22px; margin-bottom: 2px; }
+    .metric-card .title { font-size: 13px; opacity: 0.8; font-weight: 400; }
+    .metric-card .value { font-size: 16px; font-weight: 700; margin: 2px 0; }
+    .metric-card .delta { font-size: 11px; opacity: 0.7; }
     @media (max-width: 768px) {
         .metric-container { grid-template-columns: repeat(2, 1fr); }
     }
+    .blink {
+        animation: blinker 1s linear infinite;
+        color: red;
+        font-weight: bold;
+    }
+    @keyframes blinker { 50% { opacity: 0; } }
     </style>
 """, unsafe_allow_html=True)
+
 # --- CANLI KUR ---
 @st.cache_data(ttl=300)
 def get_live_usd():
     try:
         data = yf.download("USDTRY=X", period="2d", interval="1m", progress=False)
         return float(data['Close'].iloc[-1]) if not data.empty else None
-    except: return None
+    except:
+        return None
 
 usd_kur = get_live_usd() or 33.45
 
@@ -81,7 +87,11 @@ def upcoming_reminders(df, days=7):
 
 # --- YETKİ KONTROLÜ ---
 if 'auth' not in st.session_state: st.session_state.auth = None
-hashed_pwds = {"PATRON": hashlib.sha256("patron125".encode()).hexdigest(), "MUHASEBE": hashlib.sha256("muhasebe007".encode()).hexdigest(), "DENEME": hashlib.sha256("deneme123".encode()).hexdigest()}
+hashed_pwds = {
+    "PATRON": hashlib.sha256("patron125".encode()).hexdigest(),
+    "MUHASEBE": hashlib.sha256("muhasebe007".encode()).hexdigest(),
+    "DENEME": hashlib.sha256("deneme123".encode()).hexdigest()
+}
 
 if not st.session_state.auth:
     _, center, _ = st.columns([1,1.2,1])
@@ -96,7 +106,6 @@ if not st.session_state.auth:
                 if st.session_state.auth: st.rerun()
                 else: st.error("Hatalı!")
     st.stop()
-
 # --- SIDEBAR ---
 with st.sidebar:
     st.markdown("<h5 style='text-align:center; color:gray;'>🏦 Finans Pro</h5>", unsafe_allow_html=True)
@@ -123,22 +132,22 @@ with st.sidebar:
         st.rerun()
 
 # --- DASHBOARD ---
-c1, c2 = st.columns([3, 1])
-with c2:
-    soon_df = upcoming_reminders(df, days=7)
-    if not soon_df.empty:
-        st.warning("⏰ Yaklaşan Vadeler")
-        if soon_df["Gun_Farki"].min() <= 1:
-            st.markdown('<div class="blink">🚨 Vade Çok Yakın!</div>', unsafe_allow_html=True)
-        st.dataframe(soon_df[["Firma Adı", "Tutar", "Vade"]], use_container_width=True, hide_index=True)
+if menu == "🏠 Dashboard":
+    c1, c2 = st.columns([3, 1])
+    with c2:
+        soon_df = upcoming_reminders(df, days=7)
+        if not soon_df.empty:
+            st.warning("⏰ Yaklaşan Vadeler")
+            if soon_df["Gun_Farki"].min() <= 1:
+                st.markdown('<div class="blink">🚨 Vade Çok Yakın!</div>', unsafe_allow_html=True)
+            st.dataframe(soon_df[["Firma Adı", "Tutar", "Vade"]], use_container_width=True, hide_index=True)
 
-with c1:
-    if menu == "🏠 Dashboard":
+    with c1:
         st.title("⚖️ Finansal Karar Destek Paneli")
         faiz_orani = st.sidebar.slider("Faiz Oranı (%)", 0.0, 100.0, 39.75) / 100
         gercek_adat = (toplam_agirlik * faiz_orani) / 365 if toplam_agirlik else 0
 
-        # --- RESPONSIVE GRID METRICS ---
+        # --- METRİKLER ---
         st.markdown(f"""
             <div class="metric-container">
                 <div class="metric-card" style="background:#2E8B57;">
@@ -148,76 +157,4 @@ with c1:
                     <div class="delta">≈ ${total_tl/usd_kur:,.2f}</div>
                 </div>
                 <div class="metric-card" style="background:#0A84FF;">
-                    <div class="icon">⏳</div>
-                    <div class="title">Ort. Vade</div>
-                    <div class="value">{ort_vade.strftime('%d %b %Y')}</div>
-                    <div class="delta">{ort_gun} gün sonra</div>
-                </div>
-                <div class="metric-card" style="background:#F77F00;">
-                    <div class="icon">⚠️</div>
-                    <div class="title">Adat Yükü</div>
-                    <div class="value">{gercek_adat:,.2f} ₺</div>
-                    <div class="delta">KDV Hariç</div>
-                </div>
-                <div class="metric-card" style="background:linear-gradient(90deg, #0A84FF, #89CFF0);">
-                    <div class="icon">💵</div>
-                    <div class="title">USD/TRY</div>
-                    <div class="value">{usd_kur:.4f} ₺</div>
-                    <div class="delta">Canlı Veri</div>
-                </div>
-            </div>
-        """, unsafe_allow_html=True)
-
-        st.divider()
-        
-        # Grafikler ve Tablo
-        gc1, gc2 = st.columns([1.5, 1])
-        with gc1:
-            if "Vade" in selected_cols and "Tutar" in selected_cols:
-                st.plotly_chart(px.bar(valid_df, x='Vade_Date', y='Tutar', color='Evrak Tipi', height=300, template="plotly_dark", title="Ödeme Takvimi"), use_container_width=True)
-        with gc2:
-            if "Banka" in selected_cols:
-                st.plotly_chart(px.pie(df, values='Tutar', names='Banka', hole=0.4, height=300, template="plotly_dark", title="Banka Riski"), use_container_width=True)
-
-        st.subheader("📋 Detaylı Takip Listesi")
-        st.dataframe(df[selected_cols], use_container_width=True, hide_index=True)
-
-    elif menu == "📝 Veri Yönetimi":
-    st.title("🌐 Veri Yönetimi")
-
-    # --- Excel Taslağı İndir ---
-    try:
-        with open("taslak.xlsx", "rb") as f:
-            st.download_button("📄 Excel Taslağı İndir", data=f, file_name="taslak.xlsx")
-    except FileNotFoundError:
-        st.error("Taslak dosyası bulunamadı! Lütfen proje klasörüne 'taslak.xlsx' ekleyin.")
-
-    st.divider()
-
-    # --- Excel Upload ---
-    st.subheader("📤 Excel Upload")
-    uploaded_file = st.file_uploader("Excel dosyası yükle", type=["xlsx"])
-    if uploaded_file:
-        try:
-            new_df = pd.read_excel(uploaded_file)
-            st.dataframe(new_df, use_container_width=True, hide_index=True)
-
-            # Google Sheets'e yaz
-            conn.update(spreadsheet=edit_url, data=new_df)
-            st.success("✅ Veriler Google Sheets'e aktarıldı!")
-        except Exception as e:
-            st.error(f"Dosya okunamadı: {e}")
-
-    st.divider()
-
-    # --- Manuel Evrak Girişi ---
-    st.subheader("📝 Manuel Evrak Girişi")
-    with st.form("manual_entry"):
-        firma = st.text_input("Firma Adı")
-        banka = st.text_input("Banka")
-        tutar = st.number_input("Tutar", min_value=0.0)
-        vade = st.date_input("Vade")
-        aciklama = st.text_area("Açıklama")
-        submitted = st.form_submit_button("Kaydet")
-        if submitted:
-            st.success(f"{firma} için {tutar} tutarında evrak kaydedildi.")
+                    <div class="icon">
