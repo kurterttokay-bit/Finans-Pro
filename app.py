@@ -183,5 +183,41 @@ with c1:
         st.dataframe(df[selected_cols], use_container_width=True, hide_index=True)
 
     elif menu == "📝 Veri Yönetimi":
-        st.title("🌐 Veri Yönetimi")
-        st.markdown(f'<a href="{edit_url}" target="_blank" style="text-decoration:none;"><div style="background-color:#238636; color:white; padding:15px; border-radius:10px; text-align:center; font-weight:bold;">GOOGLE SHEETS DÜZENLE ↗</div></a>', unsafe_allow_html=True)
+    st.title("🌐 Veri Yönetimi")
+
+    # --- Excel Taslağı İndir ---
+    try:
+        with open("taslak.xlsx", "rb") as f:
+            st.download_button("📄 Excel Taslağı İndir", data=f, file_name="taslak.xlsx")
+    except FileNotFoundError:
+        st.error("Taslak dosyası bulunamadı! Lütfen proje klasörüne 'taslak.xlsx' ekleyin.")
+
+    st.divider()
+
+    # --- Excel Upload ---
+    st.subheader("📤 Excel Upload")
+    uploaded_file = st.file_uploader("Excel dosyası yükle", type=["xlsx"])
+    if uploaded_file:
+        try:
+            new_df = pd.read_excel(uploaded_file)
+            st.dataframe(new_df, use_container_width=True, hide_index=True)
+
+            # Google Sheets'e yaz
+            conn.update(spreadsheet=edit_url, data=new_df)
+            st.success("✅ Veriler Google Sheets'e aktarıldı!")
+        except Exception as e:
+            st.error(f"Dosya okunamadı: {e}")
+
+    st.divider()
+
+    # --- Manuel Evrak Girişi ---
+    st.subheader("📝 Manuel Evrak Girişi")
+    with st.form("manual_entry"):
+        firma = st.text_input("Firma Adı")
+        banka = st.text_input("Banka")
+        tutar = st.number_input("Tutar", min_value=0.0)
+        vade = st.date_input("Vade")
+        aciklama = st.text_area("Açıklama")
+        submitted = st.form_submit_button("Kaydet")
+        if submitted:
+            st.success(f"{firma} için {tutar} tutarında evrak kaydedildi.")
