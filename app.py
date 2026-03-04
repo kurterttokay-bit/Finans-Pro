@@ -101,29 +101,36 @@ with st.sidebar:
     tarih_araligi = st.date_input("Tarih Aralığı", [])
     menu = st.radio("Navigasyon", ["🏠 Dashboard", "📝 Veri Yönetimi"])
 
-# --- 7. VERİ FİLTRELEME VE HESAPLAMA ---
+# --- 7. VERİ FİLTRELEME VE HESAPLAMA (GÜVENLİ HALE GETİRİLDİ) ---
 filtered_df = df.copy()
+bugun = pd.Timestamp(datetime.now().date())
+f_total_tl, f_ort_vade, f_adat = 0, bugun, 0
+
 if not filtered_df.empty:
     if secilen_firma != "Tümü": filtered_df = filtered_df[filtered_df["Firma Adı"] == secilen_firma]
     if secilen_borclu != "Tümü": filtered_df = filtered_df[(filtered_df["Çeki veren"] == secilen_borclu) | (filtered_df["Asıl borçlu"] == secilen_borclu)]
     if secilen_banka != "Tümü": filtered_df = filtered_df[filtered_df["Banka"] == secilen_banka]
-    if len(tarih_araligi) == 2: filtered_df = filtered_df[(filtered_df["Vade_Date"].dt.date >= tarih_araligi[0]) & (filtered_df["Vade_Date"].dt.date <= tarih_araligi[1])]
+    if len(tarih_araligi) == 2: 
+        filtered_df = filtered_df[(filtered_df["Vade_Date"].dt.date >= tarih_araligi[0]) & (filtered_df["Vade_Date"].dt.date <= tarih_araligi[1])]
 
-bugun = pd.Timestamp(datetime.now().date())
-f_total_tl, f_ort_vade, f_adat = 0, bugun, 0
-if not filtered_df.empty:
-    f_total_tl = filtered_df['Tutar'].sum()
-    gun_farklari = (filtered_df['Vade_Date'] - bugun).dt.days
-    temp_agirlik = (filtered_df['Tutar'] * gun_farklari).sum()
-    f_ort_gun = int(round(temp_agirlik / f_total_tl)) if f_total_tl > 0 else 0
-    f_ort_vade = bugun + timedelta(days=f_ort_gun)
-    f_adat = (temp_agirlik * 0.3975) / 365
+    # HESAPLAMA ÖNCESİ TARİH KONTROLÜ (Patlamayı engelleyen kısım)
+    # Sadece geçerli tarihi olan satırları hesaplamaya dahil et
+    calc_df = filtered_df[filtered_df['Vade_Date'].notnull()].copy()
+    
+    if not calc_df.empty:
+        f_total_tl = calc_df['Tutar'].sum()
+        if f_total_tl > 0:
+            gun_farklari = (calc_df['Vade_Date'] - bugun).dt.days
+            temp_agirlik = (calc_df['Tutar'] * gun_farklari).sum()
+            f_ort_gun = int(round(temp_agirlik / f_total_tl))
+            f_ort_vade = bugun + timedelta(days=f_ort_gun)
+            f_adat = (temp_agirlik * 0.3975) / 365
 
 # --- 8. ANA EKRAN ---
 if menu == "🏠 Dashboard":
     st.title("⚖️ Finans Pro")
     
-    # 4 Metrik Kutusu
+    # Metrikleri Göster
     st.markdown(f"""
         <div class="metric-container">
             <div class="metric-card" style="background:#2E8B57;"><div class="icon">💰</div><div class="title">Toplam Borç</div><div class="value">{f_total_tl:,.2f} ₺</div></div>
@@ -139,20 +146,22 @@ if menu == "🏠 Dashboard":
         </div>
     """, unsafe_allow_html=True)
 
-    # ALEVLİ ALERT SATIRI
+    # ALEVLİ ALERT SATIRI (Güvenli Filtreleme)
     if not filtered_df.empty:
-        valid_df = filtered_df[filtered_df['Vade_Date'].notnull()].copy()
-        valid_df['gun_farki'] = (valid_df['Vade_Date'] - bugun).dt.days
-        kritik_liste = valid_df[(valid_df['gun_farki'] <= 7) & (valid_df['gun_farki'] >= 0)]
-        
-        if not kritik_liste.empty:
-            st.markdown(f"""
-                <div class="alert-bar">
-                    <span>🔥</span>
-                    <span>ACİL ÖDEME: 7 Gün İçinde {len(kritik_liste)} Evrak Var! (Toplam: {kritik_liste['Tutar'].sum():,.2f} ₺)</span>
-                    <span>🔥</span>
-                </div>
-            """, unsafe_allow_html=True)
+        # Sadece tarihi olanları kontrol et
+        valid_dates = filtered_df[filtered_df['Vade_Date'].notnull()].copy()
+        if not valid_dates.empty:
+            valid_dates['gun_farki'] = (valid_dates['Vade_Date'] - bugun).dt.days
+            kritik_liste = valid_dates[(valid_dates['gun_farki'] <= 7) & (valid_dates['gun_farki'] >= 0)]
+            
+            if not kritik_liste.empty:
+                st.markdown(f"""
+                    <div class="alert-bar">
+                        <span>🔥</span>
+                        <span>ACİL ÖDEME: 7 Gün İçinde {len(kritik_liste)} Evrak Var! (Toplam: {kritik_liste['Tutar'].sum():,.2f} ₺)</span>
+                        <span>🔥</span>
+                    </div>
+                """, unsafe_allow_html=True)
 
     col_main, col_side = st.columns([3, 1])
     with col_main:
@@ -161,8 +170,12 @@ if menu == "🏠 Dashboard":
     with col_side:
         st.subheader("⏰ Kritik Vadeler")
         if not filtered_df.empty:
-            k = filtered_df[((filtered_df['Vade_Date']-bugun).dt.days<=7)&((filtered_df['Vade_Date']-bugun).dt.days>=0)]
-            st.dataframe(k[["Firma Adı","Tutar"]], hide_index=True) if not k.empty else st.write("Vade yok.")
-else:
-    st.title("📝 Veri Yönetimi")
-    st.markdown(f'<a href="{edit_url}" target="_blank">Google Sheets Düzenle ↗</a>', unsafe_allow_html=True)
+            # Burayı da güvenli hale getirdik
+            safe_k = filtered_df[filtered_df['Vade_Date'].notnull()].copy()
+            if not safe_k.empty:
+                safe_k['fark'] = (safe_k['Vade_Date'] - bugun).dt.days
+                kritik_df = safe_k[(safe_k['fark'] <= 7) & (safe_k['fark'] >= 0)]
+                if not kritik_df.empty:
+                    st.dataframe(kritik_df[["Firma Adı","Tutar"]], hide_index=True)
+                else: st.write("Vade yok.")
+            else: st.write("Tarih verisi yok.")
