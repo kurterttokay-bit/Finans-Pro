@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
-import plotly.express as px
 from streamlit_gsheets import GSheetsConnection
 import yfinance as yf
 import hashlib
@@ -25,7 +24,6 @@ st.markdown("""
 @st.cache_data(ttl=300)
 def get_live_usd():
     try:
-        # 2026 piyasa verileri için yfinance kullanımı
         data = yf.download("USDTRY=X", period="2d", interval="1m", progress=False)
         return float(data['Close'].iloc[-1]) if not data.empty else 34.10
     except: return 34.10
@@ -71,19 +69,28 @@ if not st.session_state.auth:
                 else: st.error("Hatalı Şifre!")
     st.stop()
 
-# --- 6. SIDEBAR (GÜNCELLENMİŞ FİLTRELER) ---
+# --- 6. SIDEBAR (DİNAMİK BAĞIMLI FİLTRELER) ---
 with st.sidebar:
     st.subheader("📊 Filtreleme")
     if not df.empty:
-        secilen_banka = st.selectbox("Banka", ["Tümü"] + sorted(df["Banka"].dropna().unique().tolist()))
-        secilen_firma = st.selectbox("Firma", ["Tümü"] + sorted(df["Firma Adı"].dropna().unique().tolist()))
+        # 1. Aşama: Firma Seçimi
+        secilen_firma = st.selectbox("Firma Seçin", ["Tümü"] + sorted(df["Firma Adı"].dropna().unique().tolist()))
         
-        # Asıl Borçlu ve Çeki Veren sütunlarını birleştirip benzersiz isimleri çekiyoruz
-        borclu_listesi = sorted(list(set(df["Çeki veren"].dropna().unique().tolist() + 
-                                       df["Asıl borçlu"].dropna().unique().tolist())))
-        secilen_borclu = st.selectbox("Asıl Borçlu / Çeki Veren", ["Tümü"] + borclu_listesi)
+        # 2. Aşama: Seçilen Firmaya Göre Borçlu Listesini Daraltma
+        temp_df = df.copy()
+        if secilen_firma != "Tümü":
+            temp_df = temp_df[temp_df["Firma Adı"] == secilen_firma]
+        
+        # Sadece seçilen firmaya ait borçluları listele
+        dinamik_borclu_listesi = sorted(list(set(temp_df["Çeki veren"].dropna().unique().tolist() + 
+                                               temp_df["Asıl borçlu"].dropna().unique().tolist())))
+        
+        secilen_borclu = st.selectbox("Asıl Borçlu / Çeki Veren", ["Tümü"] + dinamik_borclu_listesi)
+        
+        # 3. Diğer Filtreler
+        secilen_banka = st.selectbox("Banka", ["Tümü"] + sorted(temp_df["Banka"].dropna().unique().tolist()))
     else:
-        secilen_banka, secilen_firma, secilen_borclu = "Tümü", "Tümü", "Tümü"
+        secilen_firma, secilen_borclu, secilen_banka = "Tümü", "Tümü", "Tümü"
         
     tarih_araligi = st.date_input("Tarih Aralığı", [])
     
@@ -96,25 +103,25 @@ with st.sidebar:
 # --- 7. VERİ FİLTRELEME VE HESAPLAMA ---
 filtered_df = df.copy() if not df.empty else pd.DataFrame()
 if not filtered_df.empty:
-    if secilen_banka != "Tümü": 
-        filtered_df = filtered_df[filtered_df["Banka"] == secilen_banka]
     if secilen_firma != "Tümü": 
         filtered_df = filtered_df[filtered_df["Firma Adı"] == secilen_firma]
     
-    # Yeni Borçlu Filtresi: Hem "Çeki veren" hem "Asıl borçlu" sütununda arama yapar
     if secilen_borclu != "Tümü":
         filtered_df = filtered_df[
             (filtered_df["Çeki veren"] == secilen_borclu) | 
             (filtered_df["Asıl borçlu"] == secilen_borclu)
         ]
         
+    if secilen_banka != "Tümü":
+        filtered_df = filtered_df[filtered_df["Banka"] == secilen_banka]
+        
     if len(tarih_araligi) == 2:
         filtered_df = filtered_df[(filtered_df["Vade_Date"].dt.date >= tarih_araligi[0]) & 
                                  (filtered_df["Vade_Date"].dt.date <= tarih_araligi[1])]
 
-# Adat ve Ortalama Vade Hesaplamaları (TCMB Avans Faizi %39,75 baz alınmıştır)
+# Adat ve Dashboard Hesaplamaları
 bugun = pd.Timestamp(datetime.now().date())
-f_total_tl, f_ort_vade, f_ort_gun, f_adat = 0, bugun, 0, 0
+f_total_tl, f_ort_vade, f_adat = 0, bugun, 0
 
 if not filtered_df.empty:
     f_total_tl = filtered_df['Tutar'].sum()
@@ -122,11 +129,13 @@ if not filtered_df.empty:
     temp_agirlik = (filtered_df['Tutar'] * gun_farklari).sum()
     f_ort_gun = int(round(temp_agirlik / f_total_tl)) if f_total_tl > 0 else 0
     f_ort_vade = bugun + timedelta(days=f_ort_gun)
-    f_adat = (temp_agirlik * 0.3975) / 365 # Adat Yükü Formülü: (Ağırlık * Faiz) / 365
+    f_adat = (temp_agirlik * 0.3975) / 365 # %39.75 faiz oranı
 
 # --- 8. ANA EKRAN ---
 if menu == "🏠 Dashboard":
     st.title("⚖️ Finansal Karar Destek Paneli")
+    
+    # Dashboard Kartları
     st.markdown(f"""
         <div class="metric-container">
             <div class="metric-card" style="background:#2E8B57;">
@@ -146,14 +155,17 @@ if menu == "🏠 Dashboard":
 
     col_main, col_side = st.columns([3, 1])
     with col_main:
-        st.subheader("📋 Takip Listesi")
+        st.subheader(f"📋 Takip Listesi ({secilen_firma if secilen_firma != 'Tümü' else 'Tüm Firmalar'})")
         st.dataframe(filtered_df, use_container_width=True, hide_index=True)
     with col_side:
         st.subheader("⏰ Kritik Vadeler")
         if not filtered_df.empty:
             kritik = filtered_df[((filtered_df['Vade_Date'] - bugun).dt.days <= 7) & 
                                  ((filtered_df['Vade_Date'] - bugun).dt.days >= 0)]
-            st.dataframe(kritik[["Firma Adı", "Tutar"]], hide_index=True) if not kritik.empty else st.write("7 gün vade yok.")
+            if not kritik.empty:
+                st.dataframe(kritik[["Firma Adı", "Tutar"]], hide_index=True)
+            else:
+                st.info("7 gün içinde vade yok.")
 else:
     st.title("🌐 Veri Yönetimi")
     st.markdown(f'<a href="{edit_url}" target="_blank">Google Sheets Düzenle ↗</a>', unsafe_allow_html=True)
