@@ -74,37 +74,29 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 df = load_data(edit_url, conn)
 usd_kur, eur_kur = get_fx_rates()
 
-# --- 5. YETKİ KONTROLÜ (DÜZELTİLDİ) ---
+# --- 5. YETKİ KONTROLÜ (EN BASİT HALİ - DİREKT ŞİFRE) ---
 if 'auth' not in st.session_state: st.session_state.auth = None
 
-# Şifrelerin SHA256 karşılıkları (patron125, muhasebe007, deneme123)
-hashed_pwds = {
-    "PATRON": "72f10b78996e1781290333331b9d4e9c704a2579172e2726588998c642232938", 
-    "MUHASEBE": "72f10d02409744c878f8702f2323e20606b52750e633d7172087d3513a851959",
-    "DENEME": "73030836526e8312012ec82d6ef5077460e5728a50f14299b8f24458f4c28131" # deneme123 burası
+# Hash kullanmayı bıraktık, direkt şifreleri kontrol ediyoruz
+gecerli_sifreler = {
+    "deneme123": "DENEME",
+    "patron125": "PATRON",
+    "muhasebe007": "MUHASEBE"
 }
 
 if not st.session_state.auth:
     _, center, _ = st.columns([1, 1.2, 1])
     with center:
-        st.markdown("<h4 style='text-align: center; color: white;'>🏦 Finans Pro Giriş</h4>", unsafe_allow_html=True)
+        st.markdown("<h4 style='text-align: center;'>🏦 Finans Pro Giriş</h4>", unsafe_allow_html=True)
         with st.form("login"):
             pwd = st.text_input("Şifre", type="password")
-            submitted = st.form_submit_button("Erişimi Aç")
-            if submitted:
-                h = hashlib.sha256(pwd.encode()).hexdigest()
-                # Şifreleri tek tek kontrol et
-                found = False
-                for role, h_pwd in hashed_pwds.items():
-                    if h == h_pwd:
-                        st.session_state.auth = role
-                        found = True
-                        break
-                
-                if found:
-                    st.rerun() # Şifre doğruysa hemen ana sayfaya atar
+            if st.form_submit_button("Erişimi Aç"):
+                # Şifre sözlükte var mı bakıyoruz
+                if pwd in gecerli_sifreler:
+                    st.session_state.auth = gecerli_sifreler[pwd]
+                    st.rerun()
                 else:
-                    st.error("Hatalı Şifre! (Lütfen deneme123 kullanın)")
+                    st.error(f"Hatalı Şifre! Yazdığın: {pwd}") # Hata yaparsan ne yazdığını gör diye ekledim
     st.stop()
 # --- 6. SIDEBAR ---
 with st.sidebar:
