@@ -17,18 +17,25 @@ st.markdown("""
     .metric-card .icon { font-size: 22px; margin-bottom: 2px; }
     .metric-card .title { font-size: 13px; opacity: 0.8; font-weight: 400; }
     .metric-card .value { font-size: 16px; font-weight: 700; margin: 2px 0; }
+    /* Döviz kutusu için özel ayar */
+    .fx-container { display: flex; flex-direction: column; justify-content: center; height: 100%; }
+    .fx-row { font-size: 14px; font-weight: 600; display: flex; justify-content: center; gap: 10px; }
     @media (max-width: 768px) { .metric-container { grid-template-columns: repeat(2, 1fr); } }
     </style>
 """, unsafe_allow_html=True)
 
 # --- 3. VERİ VE KUR FONKSİYONLARI ---
 @st.cache_data(ttl=300)
-def get_live_usd():
+def get_fx_rates():
     try:
-        # 2026 piyasa verileri için yfinance kullanımı
-        data = yf.download("USDTRY=X", period="2d", interval="1m", progress=False)
-        return float(data['Close'].iloc[-1]) if not data.empty else 34.10
-    except: return 34.10
+        # USD ve EUR kurlarını çekiyoruz
+        usd_data = yf.download("USDTRY=X", period="1d", interval="1m", progress=False)
+        eur_data = yf.download("EURTRY=X", period="1d", interval="1m", progress=False)
+        usd = float(usd_data['Close'].iloc[-1]) if not usd_data.empty else 34.15
+        eur = float(eur_data['Close'].iloc[-1]) if not eur_data.empty else 37.10
+        return usd, eur
+    except:
+        return 34.15, 37.10
 
 def load_data(url, connection):
     try:
@@ -47,7 +54,7 @@ def load_data(url, connection):
 edit_url = "https://docs.google.com/spreadsheets/d/1gow0J5IA0GaB-BjViSKGbIxoZije0klFGgvDWYHdcNA/edit#gid=0"
 conn = st.connection("gsheets", type=GSheetsConnection)
 df = load_data(edit_url, conn)
-usd_kur = get_live_usd()
+usd_kur, eur_kur = get_fx_rates()
 
 # --- 5. YETKİ KONTROLÜ ---
 if 'auth' not in st.session_state: st.session_state.auth = None
@@ -71,17 +78,22 @@ if not st.session_state.auth:
                 else: st.error("Hatalı Şifre!")
     st.stop()
 
-# --- 6. SIDEBAR (GÜNCELLENMİŞ FİLTRELER) ---
+# --- 6. SIDEBAR ---
 with st.sidebar:
     st.subheader("📊 Filtreleme")
     if not df.empty:
-        secilen_banka = st.selectbox("Banka", ["Tümü"] + sorted(df["Banka"].dropna().unique().tolist()))
-        secilen_firma = st.selectbox("Firma", ["Tümü"] + sorted(df["Firma Adı"].dropna().unique().tolist()))
+        # Firma Seçimi (Firma seçilince borçlu listesini daraltan dinamik yapı)
+        secilen_firma = st.selectbox("Firma Seçin", ["Tümü"] + sorted(df["Firma Adı"].dropna().unique().tolist()))
         
-        # Asıl Borçlu ve Çeki Veren sütunlarını birleştirip benzersiz isimleri çekiyoruz
-        borclu_listesi = sorted(list(set(df["Çeki veren"].dropna().unique().tolist() + 
-                                       df["Asıl borçlu"].dropna().unique().tolist())))
+        temp_df = df.copy()
+        if secilen_firma != "Tümü":
+            temp_df = temp_df[temp_df["Firma Adı"] == secilen_firma]
+            
+        borclu_listesi = sorted(list(set(temp_df["Çeki veren"].dropna().unique().tolist() + 
+                                       temp_df["Asıl borçlu"].dropna().unique().tolist())))
         secilen_borclu = st.selectbox("Asıl Borçlu / Çeki Veren", ["Tümü"] + borclu_listesi)
+        
+        secilen_banka = st.selectbox("Banka", ["Tümü"] + sorted(temp_df["Banka"].dropna().unique().tolist()))
     else:
         secilen_banka, secilen_firma, secilen_borclu = "Tümü", "Tümü", "Tümü"
         
@@ -96,23 +108,23 @@ with st.sidebar:
 # --- 7. VERİ FİLTRELEME VE HESAPLAMA ---
 filtered_df = df.copy() if not df.empty else pd.DataFrame()
 if not filtered_df.empty:
-    if secilen_banka != "Tümü": 
-        filtered_df = filtered_df[filtered_df["Banka"] == secilen_banka]
     if secilen_firma != "Tümü": 
         filtered_df = filtered_df[filtered_df["Firma Adı"] == secilen_firma]
     
-    # Yeni Borçlu Filtresi: Hem "Çeki veren" hem "Asıl borçlu" sütununda arama yapar
     if secilen_borclu != "Tümü":
         filtered_df = filtered_df[
             (filtered_df["Çeki veren"] == secilen_borclu) | 
             (filtered_df["Asıl borçlu"] == secilen_borclu)
         ]
+
+    if secilen_banka != "Tümü": 
+        filtered_df = filtered_df[filtered_df["Banka"] == secilen_banka]
         
     if len(tarih_araligi) == 2:
         filtered_df = filtered_df[(filtered_df["Vade_Date"].dt.date >= tarih_araligi[0]) & 
                                  (filtered_df["Vade_Date"].dt.date <= tarih_araligi[1])]
 
-# Adat ve Ortalama Vade Hesaplamaları (TCMB Avans Faizi %39,75 baz alınmıştır)
+# Adat ve Ortalama Vade Hesaplamaları
 bugun = pd.Timestamp(datetime.now().date())
 f_total_tl, f_ort_vade, f_ort_gun, f_adat = 0, bugun, 0, 0
 
@@ -122,7 +134,7 @@ if not filtered_df.empty:
     temp_agirlik = (filtered_df['Tutar'] * gun_farklari).sum()
     f_ort_gun = int(round(temp_agirlik / f_total_tl)) if f_total_tl > 0 else 0
     f_ort_vade = bugun + timedelta(days=f_ort_gun)
-    f_adat = (temp_agirlik * 0.3975) / 365 # Adat Yükü Formülü: (Ağırlık * Faiz) / 365
+    f_adat = (temp_agirlik * 0.3975) / 365
 
 # --- 8. ANA EKRAN ---
 if menu == "🏠 Dashboard":
@@ -138,8 +150,12 @@ if menu == "🏠 Dashboard":
             <div class="metric-card" style="background:#F77F00;">
                 <div class="icon">⚠️</div><div class="title">Adat Yükü</div><div class="value">{f_adat:,.2f} ₺</div>
             </div>
-            <div class="metric-card" style="background:linear-gradient(90deg, #0A84FF, #89CFF0);">
-                <div class="icon">💵</div><div class="title">USD/TRY</div><div class="value">{usd_kur:.4f} ₺</div>
+            <div class="metric-card" style="background:linear-gradient(90deg, #1C1C1E, #3A3A3C);">
+                <div class="fx-container">
+                    <div class="fx-row"><span>💵 USD:</span> <span>{usd_kur:.4f}</span></div>
+                    <div style="border-top: 1px solid rgba(255,255,255,0.1); margin: 4px 15px;"></div>
+                    <div class="fx-row"><span>💶 EUR:</span> <span>{eur_kur:.4f}</span></div>
+                </div>
             </div>
         </div>
     """, unsafe_allow_html=True)
