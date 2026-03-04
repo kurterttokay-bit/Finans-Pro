@@ -138,38 +138,27 @@ if not filtered_df.empty:
 
 # --- 8. ANA EKRAN ---
 if menu == "🏠 Dashboard":
-    st.title("⚖️ Finansal Karar Destek Paneli")
-    
-    # ... (Metric-container kısmı aynı kalıyor) ...
-
-    col_main, col_side = st.columns([3, 1])
-    with col_main:
-        st.subheader("📋 Takip Listesi")
-        st.dataframe(filtered_df, use_container_width=True, hide_index=True)
-        
-    with col_side:
-        st.subheader("⏰ Kritik Vadeler")
-        # HATA ÖNLEME: Önce tarihi boş olmayanları (NaT olmayanları) filtreliyoruz
-        if not filtered_df.empty:
-            # Geçerli tarihe sahip satırları al
-            valid_dates_df = filtered_df[filtered_df['Vade_Date'].notnull()].copy()
-            
-            if not valid_dates_df.empty:
-                # Gün farkını hesapla
-                valid_dates_df['gun_farki'] = (valid_dates_df['Vade_Date'] - bugun).dt.days
-                
-                # 0 ile 7 gün arası kalanları bul
-                kritik = valid_dates_df[(valid_dates_df['gun_farki'] <= 7) & (valid_dates_df['gun_farki'] >= 0)]
-                
-                if not kritik.empty:
-                    # Sadece gereken sütunları göster ve sırala
-                    st.dataframe(kritik[["Firma Adı", "Tutar"]].sort_values("Tutar", ascending=False), hide_index=True)
-                else:
-                    st.info("📅 7 gün içinde vade yok.")
-            else:
-                st.warning("⚠️ Geçerli tarih bulunamadı.")
-        else:
-            st.write("Veri yok.")
+    st.title("⚖️ Finansal Karar Destek Paneli")
+    st.markdown(f"""
+        <div class="metric-container">
+            <div class="metric-card" style="background:#2E8B57;">
+                <div class="icon">💰</div><div class="title">Toplam Borç</div><div class="value">{f_total_tl:,.2f} ₺</div>
+            </div>
+            <div class="metric-card" style="background:#0A84FF;">
+                <div class="icon">⏳</div><div class="title">Ort. Vade</div><div class="value">{f_ort_vade.strftime('%d %b %Y')}</div>
+            </div>
+            <div class="metric-card" style="background:#F77F00;">
+                <div class="icon">⚠️</div><div class="title">Adat Yükü</div><div class="value">{f_adat:,.2f} ₺</div>
+            </div>
+            <div class="metric-card" style="background:linear-gradient(90deg, #1C1C1E, #3A3A3C);">
+                <div class="fx-container">
+                    <div class="fx-row"><span>💵 USD:</span> <span>{usd_kur:.4f}</span></div>
+                    <div style="border-top: 1px solid rgba(255,255,255,0.1); margin: 4px 15px;"></div>
+                    <div class="fx-row"><span>💶 EUR:</span> <span>{eur_kur:.4f}</span></div>
+                </div>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
 
     col_main, col_side = st.columns([3, 1])
     with col_main:
