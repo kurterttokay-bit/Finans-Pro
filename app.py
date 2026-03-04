@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
+import plotly.express as px
 from streamlit_gsheets import GSheetsConnection
 import yfinance as yf
 import hashlib
@@ -12,28 +13,22 @@ st.set_page_config(page_title="Finans Pro", layout="wide", page_icon="🏦")
 st.markdown("""
     <style>
     .metric-container { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 20px; }
-    .metric-card { padding: 10px 5px; border-radius: 10px; text-align: center; color: white; box-shadow: 2px 2px 8px rgba(0,0,0,0.1); }
-    .metric-card .icon { font-size: 20px; margin-bottom: 2px; }
-    .metric-card .title { font-size: 12px; opacity: 0.8; }
-    .metric-card .value { font-size: 15px; font-weight: 700; }
-    .fx-container { display: flex; flex-direction: column; justify-content: center; gap: 2px; }
+    .metric-card { padding: 12px 5px; border-radius: 10px; text-align: center; color: white; box-shadow: 2px 2px 8px rgba(0,0,0,0.1); }
+    .metric-card .icon { font-size: 22px; margin-bottom: 2px; }
+    .metric-card .title { font-size: 13px; opacity: 0.8; font-weight: 400; }
+    .metric-card .value { font-size: 16px; font-weight: 700; margin: 2px 0; }
     @media (max-width: 768px) { .metric-container { grid-template-columns: repeat(2, 1fr); } }
     </style>
 """, unsafe_allow_html=True)
 
-# --- 3. CANLI KUR FONKSİYONLARI ---
+# --- 3. VERİ VE KUR FONKSİYONLARI ---
 @st.cache_data(ttl=300)
-def get_fx_rates():
+def get_live_usd():
     try:
-        # USD ve EUR kurlarını çekiyoruz
-        usd_data = yf.download("USDTRY=X", period="1d", interval="1m", progress=False)
-        eur_data = yf.download("EURTRY=X", period="1d", interval="1m", progress=False)
-        
-        usd = float(usd_data['Close'].iloc[-1]) if not usd_data.empty else 34.15
-        eur = float(eur_data['Close'].iloc[-1]) if not eur_data.empty else 37.10
-        return usd, eur
-    except:
-        return 34.15, 37.10
+        # 2026 piyasa verileri için yfinance kullanımı
+        data = yf.download("USDTRY=X", period="2d", interval="1m", progress=False)
+        return float(data['Close'].iloc[-1]) if not data.empty else 34.10
+    except: return 34.10
 
 def load_data(url, connection):
     try:
@@ -48,11 +43,11 @@ def load_data(url, connection):
     except:
         return pd.DataFrame()
 
-# --- 4. VERİ BAĞLANTISI VE KURLAR ---
+# --- 4. VERİ BAĞLANTISI ---
 edit_url = "https://docs.google.com/spreadsheets/d/1gow0J5IA0GaB-BjViSKGbIxoZije0klFGgvDWYHdcNA/edit#gid=0"
 conn = st.connection("gsheets", type=GSheetsConnection)
 df = load_data(edit_url, conn)
-usd_kur, eur_kur = get_fx_rates()
+usd_kur = get_live_usd()
 
 # --- 5. YETKİ KONTROLÜ ---
 if 'auth' not in st.session_state: st.session_state.auth = None
@@ -76,72 +71,66 @@ if not st.session_state.auth:
                 else: st.error("Hatalı Şifre!")
     st.stop()
 
-# --- 6. SIDEBAR (DİNAMİK FİLTRELER) ---
+# --- 6. SIDEBAR (GÜNCELLENMİŞ FİLTRELER) ---
 with st.sidebar:
     st.subheader("📊 Filtreleme")
     if not df.empty:
-        secilen_firma = st.selectbox("Firma Seçin", ["Tümü"] + sorted(df["Firma Adı"].dropna().unique().tolist()))
+        secilen_banka = st.selectbox("Banka", ["Tümü"] + sorted(df["Banka"].dropna().unique().tolist()))
+        secilen_firma = st.selectbox("Firma", ["Tümü"] + sorted(df["Firma Adı"].dropna().unique().tolist()))
         
-        temp_df = df.copy()
-        if secilen_firma != "Tümü":
-            temp_df = temp_df[temp_df["Firma Adı"] == secilen_firma]
-        
-        borclu_listesi = sorted(list(set(temp_df["Çeki veren"].dropna().unique().tolist() + 
-                                       temp_df["Asıl borçlu"].dropna().unique().tolist())))
+        # Asıl Borçlu ve Çeki Veren sütunlarını birleştirip benzersiz isimleri çekiyoruz
+        borclu_listesi = sorted(list(set(df["Çeki veren"].dropna().unique().tolist() + 
+                                       df["Asıl borçlu"].dropna().unique().tolist())))
         secilen_borclu = st.selectbox("Asıl Borçlu / Çeki Veren", ["Tümü"] + borclu_listesi)
-        secilen_banka = st.selectbox("Banka", ["Tümü"] + sorted(temp_df["Banka"].dropna().unique().tolist()))
     else:
-        secilen_firma, secilen_borclu, secilen_banka = "Tümü", "Tümü", "Tümü"
+        secilen_banka, secilen_firma, secilen_borclu = "Tümü", "Tümü", "Tümü"
         
     tarih_araligi = st.date_input("Tarih Aralığı", [])
+    
     st.divider()
     menu = st.radio("Navigasyon", ["🏠 Dashboard", "📝 Veri Yönetimi"])
     if st.button("🔴 Çıkış"):
         st.session_state.auth = None
         st.rerun()
 
-# --- 7. VERİ FİLTRELEME VE DÖVİZLİ HESAPLAMA ---
+# --- 7. VERİ FİLTRELEME VE HESAPLAMA ---
 filtered_df = df.copy() if not df.empty else pd.DataFrame()
-
 if not filtered_df.empty:
-    # Filtreleri Uygula
-    if secilen_firma != "Tümü": filtered_df = filtered_df[filtered_df["Firma Adı"] == secilen_firma]
+    if secilen_banka != "Tümü": 
+        filtered_df = filtered_df[filtered_df["Banka"] == secilen_banka]
+    if secilen_firma != "Tümü": 
+        filtered_df = filtered_df[filtered_df["Firma Adı"] == secilen_firma]
+    
+    # Yeni Borçlu Filtresi: Hem "Çeki veren" hem "Asıl borçlu" sütununda arama yapar
     if secilen_borclu != "Tümü":
-        filtered_df = filtered_df[(filtered_df["Çeki veren"] == secilen_borclu) | (filtered_df["Asıl borçlu"] == secilen_borclu)]
-    if secilen_banka != "Tümü": filtered_df = filtered_df[filtered_df["Banka"] == secilen_banka]
+        filtered_df = filtered_df[
+            (filtered_df["Çeki veren"] == secilen_borclu) | 
+            (filtered_df["Asıl borçlu"] == secilen_borclu)
+        ]
+        
     if len(tarih_araligi) == 2:
-        filtered_df = filtered_df[(filtered_df["Vade_Date"].dt.date >= tarih_araligi[0]) & (filtered_df["Vade_Date"].dt.date <= tarih_araligi[1])]
+        filtered_df = filtered_df[(filtered_df["Vade_Date"].dt.date >= tarih_araligi[0]) & 
+                                 (filtered_df["Vade_Date"].dt.date <= tarih_araligi[1])]
 
-    # --- KRİTİK ADIM: Döviz Çevrimi ---
-    # Tutar_TL adında yeni bir kolon oluşturuyoruz
-    def kur_carpani(row):
-        doviz = str(row['Döviz']).strip().lower()
-        if 'dolar' in doviz or 'usd' in doviz: return row['Tutar'] * usd_kur
-        elif 'euro' in doviz or 'eur' in doviz: return row['Tutar'] * eur_kur
-        else: return row['Tutar'] # TL ise olduğu gibi bırak
-
-    filtered_df['Tutar_TL'] = filtered_df.apply(kur_carpani, axis=1)
-
-# Dashboard Hesaplamaları
+# Adat ve Ortalama Vade Hesaplamaları (TCMB Avans Faizi %39,75 baz alınmıştır)
 bugun = pd.Timestamp(datetime.now().date())
-f_total_tl, f_ort_vade, f_adat = 0, bugun, 0
+f_total_tl, f_ort_vade, f_ort_gun, f_adat = 0, bugun, 0, 0
 
 if not filtered_df.empty:
-    f_total_tl = filtered_df['Tutar_TL'].sum() # Toplamı TL karşılığından alıyoruz
+    f_total_tl = filtered_df['Tutar'].sum()
     gun_farklari = (filtered_df['Vade_Date'] - bugun).dt.days
-    temp_agirlik = (filtered_df['Tutar_TL'] * gun_farklari).sum() # Adat hesabında TL karşılığı kullanılıyor
+    temp_agirlik = (filtered_df['Tutar'] * gun_farklari).sum()
     f_ort_gun = int(round(temp_agirlik / f_total_tl)) if f_total_tl > 0 else 0
     f_ort_vade = bugun + timedelta(days=f_ort_gun)
-    f_adat = (temp_agirlik * 0.3975) / 365
+    f_adat = (temp_agirlik * 0.3975) / 365 # Adat Yükü Formülü: (Ağırlık * Faiz) / 365
 
 # --- 8. ANA EKRAN ---
 if menu == "🏠 Dashboard":
     st.title("⚖️ Finansal Karar Destek Paneli")
-    
     st.markdown(f"""
         <div class="metric-container">
             <div class="metric-card" style="background:#2E8B57;">
-                <div class="icon">💰</div><div class="title">Toplam Borç (TL)</div><div class="value">{f_total_tl:,.2f} ₺</div>
+                <div class="icon">💰</div><div class="title">Toplam Borç</div><div class="value">{f_total_tl:,.2f} ₺</div>
             </div>
             <div class="metric-card" style="background:#0A84FF;">
                 <div class="icon">⏳</div><div class="title">Ort. Vade</div><div class="value">{f_ort_vade.strftime('%d %b %Y')}</div>
@@ -149,16 +138,8 @@ if menu == "🏠 Dashboard":
             <div class="metric-card" style="background:#F77F00;">
                 <div class="icon">⚠️</div><div class="title">Adat Yükü</div><div class="value">{f_adat:,.2f} ₺</div>
             </div>
-            <div class="metric-card" style="background:linear-gradient(90deg, #1C1C1E, #3A3A3C);">
-                <div class="fx-container">
-                    <div style="display:flex; justify-content:space-around; align-items:center;">
-                        <span style="font-size:11px;">💵 USD: <b>{usd_kur:.4f}</b></span>
-                    </div>
-                    <div style="border-top: 1px solid rgba(255,255,255,0.1); margin: 2px 0;"></div>
-                    <div style="display:flex; justify-content:space-around; align-items:center;">
-                        <span style="font-size:11px;">💶 EUR: <b>{eur_kur:.4f}</b></span>
-                    </div>
-                </div>
+            <div class="metric-card" style="background:linear-gradient(90deg, #0A84FF, #89CFF0);">
+                <div class="icon">💵</div><div class="title">USD/TRY</div><div class="value">{usd_kur:.4f} ₺</div>
             </div>
         </div>
     """, unsafe_allow_html=True)
@@ -166,13 +147,13 @@ if menu == "🏠 Dashboard":
     col_main, col_side = st.columns([3, 1])
     with col_main:
         st.subheader("📋 Takip Listesi")
-        # Listede hem orijinal tutarı hem de TL karşılığını gösterelim
         st.dataframe(filtered_df, use_container_width=True, hide_index=True)
     with col_side:
         st.subheader("⏰ Kritik Vadeler")
         if not filtered_df.empty:
-            kritik = filtered_df[((filtered_df['Vade_Date'] - bugun).dt.days <= 7) & ((filtered_df['Vade_Date'] - bugun).dt.days >= 0)]
-            st.dataframe(kritik[["Firma Adı", "Tutar_TL"]], hide_index=True) if not kritik.empty else st.info("7 gün vade yok.")
+            kritik = filtered_df[((filtered_df['Vade_Date'] - bugun).dt.days <= 7) & 
+                                 ((filtered_df['Vade_Date'] - bugun).dt.days >= 0)]
+            st.dataframe(kritik[["Firma Adı", "Tutar"]], hide_index=True) if not kritik.empty else st.write("7 gün vade yok.")
 else:
     st.title("🌐 Veri Yönetimi")
     st.markdown(f'<a href="{edit_url}" target="_blank">Google Sheets Düzenle ↗</a>', unsafe_allow_html=True)
