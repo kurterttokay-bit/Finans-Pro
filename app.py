@@ -8,7 +8,7 @@ import hashlib
 # --- 1. SAYFA AYARLARI ---
 st.set_page_config(page_title="Finans Pro", layout="wide", page_icon="🏦")
 
-# --- 2. ÖZEL CSS (Alev Efekti ve Metrik Tasarımları) ---
+# --- 2. ÖZEL CSS (Tablo ve Metriklerin Görünmesi İçin Düzeltildi) ---
 st.markdown("""
     <style>
     .metric-container { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 20px; }
@@ -34,9 +34,7 @@ st.markdown("""
         margin-bottom: 20px;
         border: 2px solid #ff4b2b;
         animation: border-glow 1.5s infinite;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
+        display: flex; justify-content: space-between; align-items: center;
     }
     @media (max-width: 768px) { .metric-container { grid-template-columns: repeat(2, 1fr); } }
     </style>
@@ -60,10 +58,7 @@ def load_data(url, connection):
         expected_cols = ["Firma Adı","Evrak Tipi","Banka","Tutar","Vade","Açıklama",
                          "Çeki veren","Cirolu","Asıl borçlu","Kime verildi","Evrak No","Döviz","Durum"]
         raw_df = raw_df.rename(columns={c:expected_cols[i] for i,c in enumerate(raw_df.columns) if i < len(expected_cols)})
-        
-        # Veri Temizleme: Tutar nümerik olmalı, Vade tarih olmalı
         raw_df['Tutar'] = pd.to_numeric(raw_df['Tutar'], errors='coerce').fillna(0)
-        # dayfirst=True Türkiye tarih formatı (GG.AA.YYYY) için kritik
         raw_df['Vade_Date'] = pd.to_datetime(raw_df['Vade'], errors='coerce', dayfirst=True)
         return raw_df
     except: return pd.DataFrame()
@@ -74,30 +69,22 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 df = load_data(edit_url, conn)
 usd_kur, eur_kur = get_fx_rates()
 
-# --- 5. YETKİ KONTROLÜ (EN BASİT HALİ - DİREKT ŞİFRE) ---
+# --- 5. YETKİ KONTROLÜ (DİREKT METİN) ---
 if 'auth' not in st.session_state: st.session_state.auth = None
-
-# Hash kullanmayı bıraktık, direkt şifreleri kontrol ediyoruz
-gecerli_sifreler = {
-    "deneme123": "DENEME",
-    "patron125": "PATRON",
-    "muhasebe007": "MUHASEBE"
-}
+gecerli_sifreler = {"deneme123": "DENEME", "patron125": "PATRON", "muhasebe007": "MUHASEBE"}
 
 if not st.session_state.auth:
     _, center, _ = st.columns([1, 1.2, 1])
     with center:
-        st.markdown("<h4 style='text-align: center;'>🏦 Finans Pro Giriş</h4>", unsafe_allow_html=True)
         with st.form("login"):
             pwd = st.text_input("Şifre", type="password")
             if st.form_submit_button("Erişimi Aç"):
-                # Şifre sözlükte var mı bakıyoruz
                 if pwd in gecerli_sifreler:
                     st.session_state.auth = gecerli_sifreler[pwd]
                     st.rerun()
-                else:
-                    st.error(f"Hatalı Şifre! Yazdığın: {pwd}") # Hata yaparsan ne yazdığını gör diye ekledim
+                else: st.error("Hatalı Şifre!")
     st.stop()
+
 # --- 6. SIDEBAR ---
 with st.sidebar:
     st.subheader("📊 Filtreleme")
@@ -110,13 +97,12 @@ with st.sidebar:
     else:
         secilen_firma, secilen_borclu, secilen_banka = "Tümü", "Tümü", "Tümü"
     tarih_araligi = st.date_input("Tarih Aralığı", [])
-    st.divider()
     menu = st.radio("Navigasyon", ["🏠 Dashboard", "📝 Veri Yönetimi"])
     if st.button("🔴 Çıkış"):
         st.session_state.auth = None
         st.rerun()
 
-# --- 7. VERİ FİLTRELEME VE GÜVENLİ HESAPLAMA ---
+# --- 7. VERİ FİLTRELEME VE HESAPLAMA ---
 filtered_df = df.copy()
 bugun = pd.Timestamp(datetime.now().date())
 f_total_tl, f_ort_vade, f_adat = 0, bugun, 0
@@ -128,9 +114,7 @@ if not filtered_df.empty:
     if len(tarih_araligi) == 2: 
         filtered_df = filtered_df[(filtered_df["Vade_Date"].dt.date >= tarih_araligi[0]) & (filtered_df["Vade_Date"].dt.date <= tarih_araligi[1])]
 
-    # Hesaplama yaparken hatalı tarihli (NaT) satırları hariç tutuyoruz
     calc_df = filtered_df[filtered_df['Vade_Date'].notnull()].copy()
-    
     if not calc_df.empty:
         f_total_tl = calc_df['Tutar'].sum()
         if f_total_tl > 0:
@@ -144,26 +128,18 @@ if not filtered_df.empty:
 if menu == "🏠 Dashboard":
     st.title("⚖️ Finans Pro")
     
-    # Kalan gün hesaplama
     kalan_gun = (f_ort_vade - bugun).days
     gun_metni = f"{kalan_gun} Gün Kaldı" if kalan_gun >= 0 else f"{abs(kalan_gun)} Gün Geçti"
 
-    # 4 Metrik Kutusu (Ort. Vade altına gün eklendi)
     st.markdown(f"""
         <div class="metric-container">
-            <div class="metric-card" style="background:#2E8B57;">
-                <div class="icon">💰</div><div class="title">Toplam Borç</div>
-                <div class="value">{f_total_tl:,.2f} ₺</div>
-            </div>
+            <div class="metric-card" style="background:#2E8B57;"><div class="icon">💰</div><div class="title">Toplam Borç</div><div class="value">{f_total_tl:,.2f} ₺</div></div>
             <div class="metric-card" style="background:#0A84FF;">
                 <div class="icon">⏳</div><div class="title">Ort. Vade</div>
                 <div class="value" style="margin-bottom:0px;">{f_ort_vade.strftime('%d.%m.%Y')}</div>
-                <div style="font-size: 12px; font-weight: 400; opacity: 0.9;">{gun_metni}</div>
+                <div style="font-size: 11px; opacity: 0.9;">{gun_metni}</div>
             </div>
-            <div class="metric-card" style="background:#F77F00;">
-                <div class="icon">⚠️</div><div class="title">Adat Yükü</div>
-                <div class="value">{f_adat:,.2f} ₺</div>
-            </div>
+            <div class="metric-card" style="background:#F77F00;"><div class="icon">⚠️</div><div class="title">Adat Yükü</div><div class="value">{f_adat:,.2f} ₺</div></div>
             <div class="metric-card" style="background:linear-gradient(90deg, #1C1C1E, #3A3A3C);">
                 <div class="fx-container">
                     <div class="fx-row"><span>💵 USD:</span> <span>{usd_kur:.4f}</span></div>
@@ -173,3 +149,27 @@ if menu == "🏠 Dashboard":
             </div>
         </div>
     """, unsafe_allow_html=True)
+
+    if not filtered_df.empty:
+        valid_v = filtered_df[filtered_df['Vade_Date'].notnull()].copy()
+        valid_v['fark'] = (valid_v['Vade_Date'] - bugun).dt.days
+        kritik = valid_v[(valid_v['fark'] <= 7) & (valid_v['fark'] >= 0)]
+        if not kritik.empty:
+            st.markdown(f'<div class="alert-bar"><span>🔥</span><span>ACİL ÖDEME: 7 Gün İçinde {len(kritik)} Evrak! (Toplam: {kritik["Tutar"].sum():,.2f} ₺)</span><span>🔥</span></div>', unsafe_allow_html=True)
+
+    col_main, col_side = st.columns([3, 1])
+    with col_main:
+        st.subheader("📋 Takip Listesi")
+        st.dataframe(filtered_df, use_container_width=True, hide_index=True)
+    with col_side:
+        st.subheader("⏰ Kritik Vadeler")
+        if not filtered_df.empty:
+            safe_k = filtered_df[filtered_df['Vade_Date'].notnull()].copy()
+            safe_k['fark'] = (safe_k['Vade_Date'] - bugun).dt.days
+            k_df = safe_k[(safe_k['fark'] <= 7) & (safe_k['fark'] >= 0)]
+            if not k_df.empty:
+                st.dataframe(k_df[["Firma Adı","Tutar"]], hide_index=True)
+            else: st.info("Vade yok.")
+else:
+    st.title("📝 Veri Yönetimi")
+    st.markdown(f'<a href="{edit_url}" target="_blank">Google Sheets Düzenle ↗</a>', unsafe_allow_html=True)
