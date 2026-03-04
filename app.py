@@ -124,52 +124,69 @@ if not filtered_df.empty:
             f_ort_vade = bugun + timedelta(days=f_ort_gun)
             f_adat = (temp_agirlik * 0.3975) / 365
 
-# --- 8. ANA EKRAN ---
-if menu == "🏠 Dashboard":
-    st.title("⚖️ Finans Pro")
-    
-    kalan_gun = (f_ort_vade - bugun).days
-    gun_metni = f"{kalan_gun} Gün Kaldı" if kalan_gun >= 0 else f"{abs(kalan_gun)} Gün Geçti"
-
-    st.markdown(f"""
-        <div class="metric-container">
-            <div class="metric-card" style="background:#2E8B57;"><div class="icon">💰</div><div class="title">Toplam Borç</div><div class="value">{f_total_tl:,.2f} ₺</div></div>
-            <div class="metric-card" style="background:#0A84FF;">
-                <div class="icon">⏳</div><div class="title">Ort. Vade</div>
-                <div class="value" style="margin-bottom:0px;">{f_ort_vade.strftime('%d.%m.%Y')}</div>
-                <div style="font-size: 11px; opacity: 0.9;">{gun_metni}</div>
-            </div>
-            <div class="metric-card" style="background:#F77F00;"><div class="icon">⚠️</div><div class="title">Adat Yükü</div><div class="value">{f_adat:,.2f} ₺</div></div>
-            <div class="metric-card" style="background:linear-gradient(90deg, #1C1C1E, #3A3A3C);">
-                <div class="fx-container">
-                    <div class="fx-row"><span>💵 USD:</span> <span>{usd_kur:.4f}</span></div>
-                    <div style="border-top: 1px solid rgba(255,255,255,0.1); margin: 4px 15px;"></div>
-                    <div class="fx-row"><span>💶 EUR:</span> <span>{eur_kur:.4f}</span></div>
-                </div>
-            </div>
-        </div>
-    """, unsafe_allow_html=True)
-
-    if not filtered_df.empty:
-        valid_v = filtered_df[filtered_df['Vade_Date'].notnull()].copy()
-        valid_v['fark'] = (valid_v['Vade_Date'] - bugun).dt.days
-        kritik = valid_v[(valid_v['fark'] <= 7) & (valid_v['fark'] >= 0)]
-        if not kritik.empty:
-            st.markdown(f'<div class="alert-bar"><span>🔥</span><span>ACİL ÖDEME: 7 Gün İçinde {len(kritik)} Evrak! (Toplam: {kritik["Tutar"].sum():,.2f} ₺)</span><span>🔥</span></div>', unsafe_allow_html=True)
-
-    col_main, col_side = st.columns([3, 1])
-    with col_main:
-        st.subheader("📋 Takip Listesi")
-        st.dataframe(filtered_df, use_container_width=True, hide_index=True)
-    with col_side:
-        st.subheader("⏰ Kritik Vadeler")
-        if not filtered_df.empty:
-            safe_k = filtered_df[filtered_df['Vade_Date'].notnull()].copy()
-            safe_k['fark'] = (safe_k['Vade_Date'] - bugun).dt.days
-            k_df = safe_k[(safe_k['fark'] <= 7) & (safe_k['fark'] >= 0)]
-            if not k_df.empty:
-                st.dataframe(k_df[["Firma Adı","Tutar"]], hide_index=True)
-            else: st.info("Vade yok.")
+# --- 8. ANA EKRAN (VERİ YÖNETİMİ BÖLÜMÜ GÜNCELLEMESİ) ---
 else:
     st.title("📝 Veri Yönetimi")
-    st.markdown(f'<a href="{edit_url}" target="_blank">Google Sheets Düzenle ↗</a>', unsafe_allow_html=True)
+    st.markdown("---")
+
+    # CSS ile Yönetim Kutularını Şıklaştıralım
+    st.markdown("""
+        <style>
+        .manage-container { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 30px; }
+        .manage-card { 
+            background: #1E1E1E; border: 1px solid #333; padding: 20px; border-radius: 15px; 
+            text-align: center; transition: 0.3s; cursor: pointer; color: white;
+        }
+        .manage-card:hover { border-color: #ff4b2b; transform: translateY(-5px); }
+        .manage-icon { font-size: 30px; margin-bottom: 10px; }
+        .manage-title { font-size: 15px; font-weight: bold; margin-bottom: 5px; }
+        .manage-desc { font-size: 11px; opacity: 0.7; }
+        </style>
+    """, unsafe_allow_html=True)
+
+    # Üst Panel - 4 Ana Kutu
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.markdown("""<div class="manage-card"><div class="manage-icon">📥</div><div class="manage-title">Taslak İndir</div><div class="manage-desc">Excel şablonunu al</div></div>""", unsafe_allow_html=True)
+        # Mevcut sütun yapısında boş bir Excel oluşturup indiriyoruz
+        template_df = pd.DataFrame(columns=["Firma Adı","Evrak Tipi","Banka","Tutar","Vade","Açıklama","Çeki veren","Cirolu","Asıl borçlu","Kime verildi","Evrak No","Döviz","Durum"])
+        st.download_button("Excel Olarak İndir", data=template_df.to_csv(index=False).encode('utf-8-sig'), file_name="FinansPro_Taslak.csv", mime="text/csv", use_container_width=True)
+
+    with col2:
+        st.markdown("""<div class="manage-card"><div class="manage-icon">📤</div><div class="manage-title">Veri Yükle</div><div class="manage-desc">Doldurduğun dosyayı yükle</div></div>""", unsafe_allow_html=True)
+        uploaded_file = st.file_uploader("Dosya Seç", type=["csv", "xlsx"])
+        if uploaded_file:
+            st.success("Dosya algılandı, entegrasyon için hazır!")
+
+    with col3:
+        st.markdown("""<div class="manage-card"><div class="manage-icon">🌐</div><div class="manage-title">E-Tablo Git</div><div class="manage-desc">Bulut üzerinden düzenle</div></div>""", unsafe_allow_html=True)
+        st.link_button("Google Sheets'i Aç ↗", edit_url, use_container_width=True)
+
+    with col4:
+        st.markdown("""<div class="manage-card"><div class="manage-icon">✍️</div><div class="manage-title">Manuel Giriş</div><div class="manage-desc">Tek tek kayıt ekle</div></div>""", unsafe_allow_html=True)
+        show_manual = st.toggle("Manuel Formu Aç/Kapat")
+
+    # Alt Panel - Tıklayınca Açılan Manuel Giriş Formu
+    if show_manual:
+        st.markdown("---")
+        st.subheader("➕ Yeni Evrak Kaydı")
+        with st.form("manuel_kayit"):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                f_name = st.text_input("Firma Adı")
+                e_tipi = st.selectbox("Evrak Tipi", ["Çek", "Senet", "Kredi", "Diğer"])
+                banka = st.text_input("Banka")
+            with c2:
+                tutar = st.number_input("Tutar", min_value=0.0)
+                vade = st.date_input("Vade Tarihi")
+                doviz = st.selectbox("Döviz", ["TL", "USD", "EUR"])
+            with c3:
+                borclu = st.text_input("Asıl Borçlu")
+                evrak_no = st.text_input("Evrak No")
+                durum = st.selectbox("Durum", ["Ödenmedi", "Ödendi", "Takas", "Portföy"])
+            
+            aciklama = st.text_area("Açıklama")
+            
+            if st.form_submit_button("Sisteme Kaydet (E-Tabloya Gönder)"):
+                st.info("Bu özellik Google Sheets yazma yetkisi (service_account) gerektirir. Şu an sadece arayüz hazırdır.")
