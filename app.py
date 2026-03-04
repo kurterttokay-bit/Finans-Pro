@@ -154,18 +154,20 @@ if tarih_araligi and len(tarih_araligi) == 2:
     filtered_df = filtered_df[(filtered_df["Vade_Date"] >= start) & (filtered_df["Vade_Date"] <= end)]
 
 # Filtrelenmiş verilere göre metrikleri güncelle
+# Filtrelenmiş verilere göre metrikleri güncelle
 if not filtered_df.empty:
     f_total_tl = filtered_df['Tutar'].sum()
-    bugun = datetime.now().date()
-    temp_agirlik = (filtered_df['Tutar'] * (filtered_df['Vade_Date'] - bugun).dt.days).sum()
+    bugun = pd.Timestamp(datetime.now().date())   # datetime64 tipine çevir
+    gun_farklari = (filtered_df['Vade_Date'] - bugun).apply(lambda x: x.days)  # farkı gün cinsinden al
+    temp_agirlik = (filtered_df['Tutar'] * gun_farklari).sum()
     f_ort_gun = int(round(temp_agirlik / f_total_tl)) if f_total_tl > 0 else 0
     f_ort_vade = bugun + timedelta(days=f_ort_gun)
-    # Slider dashboard içindeyse hata vermemesi için buradaki sliderı dashboard içine taşıyoruz, burada default faiz kullanıyoruz
     f_faiz_hesap = 0.3975 
     f_adat = (temp_agirlik * f_faiz_hesap) / 365
 else:
     f_total_tl, f_ort_vade, f_ort_gun, f_adat = 0, datetime.now().date(), 0, 0
     f_faiz_hesap = 0.3975
+
 
 # --- DASHBOARD LAYOUT ---
 c1, c2 = st.columns([3, 1])
