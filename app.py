@@ -8,9 +8,8 @@ import hashlib
 
 # --- 1. SAYFA AYARLARI ---
 st.set_page_config(page_title="Finans Pro", layout="wide", page_icon="🏦")
-st.info("📊 Filtreleri görmek için sol üstteki menüyü açın.")
 
-# --- 2. ÖZEL CSS (TASARIM) ---
+# --- 2. ÖZEL CSS ---
 st.markdown("""
     <style>
     .metric-container { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 20px; }
@@ -31,14 +30,17 @@ def get_live_usd():
     except: return 34.10
 
 def load_data(url, connection):
-    raw_df = connection.read(spreadsheet=url, ttl=0)
-    raw_df.columns = raw_df.columns.str.strip()
-    expected_cols = ["Firma Adı","Evrak Tipi","Banka","Tutar","Vade","Açıklama",
-                     "Çeki veren","Cirolu","Asıl borçlu","Kime verildi","Evrak No","Döviz","Durum"]
-    raw_df = raw_df.rename(columns={c:expected_cols[i] for i,c in enumerate(raw_df.columns) if i < len(expected_cols)})
-    raw_df['Tutar'] = pd.to_numeric(raw_df['Tutar'], errors='coerce').fillna(0)
-    raw_df['Vade_Date'] = pd.to_datetime(raw_df['Vade'], errors='coerce')
-    return raw_df
+    try:
+        raw_df = connection.read(spreadsheet=url, ttl=0)
+        raw_df.columns = raw_df.columns.str.strip()
+        expected_cols = ["Firma Adı","Evrak Tipi","Banka","Tutar","Vade","Açıklama",
+                         "Çeki veren","Cirolu","Asıl borçlu","Kime verildi","Evrak No","Döviz","Durum"]
+        raw_df = raw_df.rename(columns={c:expected_cols[i] for i,c in enumerate(raw_df.columns) if i < len(expected_cols)})
+        raw_df['Tutar'] = pd.to_numeric(raw_df['Tutar'], errors='coerce').fillna(0)
+        raw_df['Vade_Date'] = pd.to_datetime(raw_df['Vade'], errors='coerce')
+        return raw_df
+    except:
+        return pd.DataFrame()
 
 # --- 4. VERİ BAĞLANTISI ---
 edit_url = "https://docs.google.com/spreadsheets/d/1gow0J5IA0GaB-BjViSKGbIxoZije0klFGgvDWYHdcNA/edit#gid=0"
@@ -46,11 +48,13 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 df = load_data(edit_url, conn)
 usd_kur = get_live_usd()
 
-# --- 5. YETKİ KONTROLÜ ---
+# --- 5. YETKİ KONTROLÜ (GÜNCELLENDİ) ---
 if 'auth' not in st.session_state: st.session_state.auth = None
+# DENEME kullanıcısı buraya eklendi
 hashed_pwds = {
     "PATRON": hashlib.sha256("patron125".encode()).hexdigest(),
-    "MUHASEBE": hashlib.sha256("muhasebe007".encode()).hexdigest()
+    "MUHASEBE": hashlib.sha256("muhasebe007".encode()).hexdigest(),
+    "DENEME": hashlib.sha256("deneme123".encode()).hexdigest()
 }
 
 if not st.session_state.auth:
@@ -67,49 +71,45 @@ if not st.session_state.auth:
                 else: st.error("Hatalı Şifre!")
     st.stop()
 
-# --- 6. SIDEBAR (FİLTRELER) ---
+# --- 6. SIDEBAR ---
 with st.sidebar:
     st.subheader("📊 Filtreleme")
-    secilen_banka = st.selectbox("Banka", ["Tümü"] + sorted(df["Banka"].dropna().unique().tolist()))
-    secilen_firma = st.selectbox("Firma", ["Tümü"] + sorted(df["Firma Adı"].dropna().unique().tolist()))
+    if not df.empty:
+        secilen_banka = st.selectbox("Banka", ["Tümü"] + sorted(df["Banka"].dropna().unique().tolist()))
+        secilen_firma = st.selectbox("Firma", ["Tümü"] + sorted(df["Firma Adı"].dropna().unique().tolist()))
+    else:
+        secilen_banka, secilen_firma = "Tümü", "Tümü"
     tarih_araligi = st.date_input("Tarih Aralığı", [])
     
     st.divider()
     menu = st.radio("Navigasyon", ["🏠 Dashboard", "📝 Veri Yönetimi"])
-    
-    st.divider()
     if st.button("🔴 Çıkış"):
         st.session_state.auth = None
         st.rerun()
 
 # --- 7. VERİ FİLTRELEME VE HESAPLAMA ---
-filtered_df = df.copy()
-if secilen_banka != "Tümü": 
-    filtered_df = filtered_df[filtered_df["Banka"] == secilen_banka]
-if secilen_firma != "Tümü": 
-    filtered_df = filtered_df[filtered_df["Firma Adı"] == secilen_firma]
-if len(tarih_araligi) == 2:
-    filtered_df = filtered_df[(filtered_df["Vade_Date"].dt.date >= tarih_araligi[0]) & 
-                             (filtered_df["Vade_Date"].dt.date <= tarih_araligi[1])]
+filtered_df = df.copy() if not df.empty else pd.DataFrame()
+if not filtered_df.empty:
+    if secilen_banka != "Tümü": filtered_df = filtered_df[filtered_df["Banka"] == secilen_banka]
+    if secilen_firma != "Tümü": filtered_df = filtered_df[filtered_df["Firma Adı"] == secilen_firma]
+    if len(tarih_araligi) == 2:
+        filtered_df = filtered_df[(filtered_df["Vade_Date"].dt.date >= tarih_araligi[0]) & 
+                                 (filtered_df["Vade_Date"].dt.date <= tarih_araligi[1])]
 
-# Metrik Hesaplamaları
 bugun = pd.Timestamp(datetime.now().date())
 f_total_tl, f_ort_vade, f_ort_gun, f_adat = 0, bugun, 0, 0
 
 if not filtered_df.empty:
     f_total_tl = filtered_df['Tutar'].sum()
-    # Adat ve Vade (Ağırlıklı Ortalama)
     gun_farklari = (filtered_df['Vade_Date'] - bugun).dt.days
     temp_agirlik = (filtered_df['Tutar'] * gun_farklari).sum()
     f_ort_gun = int(round(temp_agirlik / f_total_tl)) if f_total_tl > 0 else 0
     f_ort_vade = bugun + timedelta(days=f_ort_gun)
-    f_adat = (temp_agirlik * 0.3975) / 365 # %39.75 faiz varsayılan
+    f_adat = (temp_agirlik * 0.3975) / 365
 
 # --- 8. ANA EKRAN ---
 if menu == "🏠 Dashboard":
     st.title("⚖️ Finansal Karar Destek Paneli")
-    
-    # Metrik Kartları
     st.markdown(f"""
         <div class="metric-container">
             <div class="metric-card" style="background:#2E8B57;">
@@ -127,29 +127,16 @@ if menu == "🏠 Dashboard":
         </div>
     """, unsafe_allow_html=True)
 
-    # İçerik Alanı
     col_main, col_side = st.columns([3, 1])
-    
     with col_main:
         st.subheader("📋 Takip Listesi")
         st.dataframe(filtered_df, use_container_width=True, hide_index=True)
-        
     with col_side:
         st.subheader("⏰ Kritik Vadeler")
-        kritik = filtered_df[((filtered_df['Vade_Date'] - bugun).dt.days <= 7) & 
-                             ((filtered_df['Vade_Date'] - bugun).dt.days >= 0)]
-        if not kritik.empty:
-            st.dataframe(kritik[["Firma Adı", "Tutar"]], hide_index=True)
-        else:
-            st.write("Önümüzdeki 7 gün vade yok.")
-
+        if not filtered_df.empty:
+            kritik = filtered_df[((filtered_df['Vade_Date'] - bugun).dt.days <= 7) & 
+                                 ((filtered_df['Vade_Date'] - bugun).dt.days >= 0)]
+            st.dataframe(kritik[["Firma Adı", "Tutar"]], hide_index=True) if not kritik.empty else st.write("7 gün vade yok.")
 else:
     st.title("🌐 Veri Yönetimi")
-    st.info("Verileri düzenlemek için aşağıdaki butona tıklayarak Google Sheets'e gidebilirsiniz.")
-    st.markdown(f'''
-        <a href="{edit_url}" target="_blank">
-            <button style="padding:10px 20px; background-color:#238636; color:white; border:none; border-radius:5px; cursor:pointer;">
-                Google Sheets'i Aç ↗
-            </button>
-        </a>
-    ''', unsafe_allow_html=True)
+    st.markdown(f'<a href="{edit_url}" target="_blank">Google Sheets Düzenle ↗</a>', unsafe_allow_html=True)
