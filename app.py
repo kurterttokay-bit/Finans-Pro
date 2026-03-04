@@ -85,7 +85,7 @@ def upcoming_reminders(df, days=7):
     temp_df["Gun_Farki"] = temp_df["Vade_Date"].apply(lambda x: (x - today).days if pd.notnull(x) else None)
     return temp_df[temp_df["Gun_Farki"].notnull() & (temp_df["Gun_Farki"] <= days) & (temp_df["Gun_Farki"] >= 0)]
 
-# --- YETKİ KONTROLÜ ---
+# --- LOGIN ---
 if 'auth' not in st.session_state: st.session_state.auth = None
 hashed_pwds = {
     "PATRON": hashlib.sha256("patron125".encode()).hexdigest(),
@@ -106,55 +106,3 @@ if not st.session_state.auth:
                 if st.session_state.auth: st.rerun()
                 else: st.error("Hatalı!")
     st.stop()
-# --- SIDEBAR ---
-with st.sidebar:
-    st.markdown("<h5 style='text-align:center; color:gray;'>🏦 Finans Pro</h5>", unsafe_allow_html=True)
-    st.divider()
-    if st.session_state.auth == "MUHASEBE": menu = "📝 Veri Yönetimi"
-    elif st.session_state.auth == "PATRON": menu = "🏠 Dashboard"
-    else: menu = st.radio("Navigasyon", ["🏠 Dashboard", "📝 Veri Yönetimi"], horizontal=True)
-    
-    st.divider()
-    st.subheader("🔍 Evrak Arama")
-    aranan = st.text_input("Evrak No girin", placeholder="Örn: 123456")
-    if aranan:
-        sonuc = df[df["Evrak No"].astype(str) == aranan]
-        if not sonuc.empty: st.dataframe(sonuc, use_container_width=True, hide_index=True)
-        else: st.warning("Bulunamadı.")
-
-    st.divider()
-    with st.expander("📑 Detaylandır"):
-        selected_cols = st.multiselect("Gösterilecek kolonlar", df.columns.tolist(), default=df.columns.tolist())
-
-    st.divider()
-    if st.button("🔴 Çıkış", use_container_width=True):
-        st.session_state.auth = None
-        st.rerun()
-
-# --- DASHBOARD ---
-if menu == "🏠 Dashboard":
-    c1, c2 = st.columns([3, 1])
-    with c2:
-        soon_df = upcoming_reminders(df, days=7)
-        if not soon_df.empty:
-            st.warning("⏰ Yaklaşan Vadeler")
-            if soon_df["Gun_Farki"].min() <= 1:
-                st.markdown('<div class="blink">🚨 Vade Çok Yakın!</div>', unsafe_allow_html=True)
-            st.dataframe(soon_df[["Firma Adı", "Tutar", "Vade"]], use_container_width=True, hide_index=True)
-
-    with c1:
-        st.title("⚖️ Finansal Karar Destek Paneli")
-        faiz_orani = st.sidebar.slider("Faiz Oranı (%)", 0.0, 100.0, 39.75) / 100
-        gercek_adat = (toplam_agirlik * faiz_orani) / 365 if toplam_agirlik else 0
-
-        # --- METRİKLER ---
-        st.markdown(f"""
-            <div class="metric-container">
-                <div class="metric-card" style="background:#2E8B57;">
-                    <div class="icon">💰</div>
-                    <div class="title">Toplam Borç</div>
-                    <div class="value">{total_tl:,.2f} ₺</div>
-                    <div class="delta">≈ ${total_tl/usd_kur:,.2f}</div>
-                </div>
-                <div class="metric-card" style="background:#0A84FF;">
-                    <div class="icon">
