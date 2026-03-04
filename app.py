@@ -126,6 +126,7 @@ if menu == "🏠 Dashboard":
     kalan_gun = (f_ort_vade - bugun).days
     gun_metni = f"{kalan_gun} Gün Kaldı" if kalan_gun >= 0 else f"{abs(kalan_gun)} Gün Geçti"
 
+    # METRİK KUTULARI
     st.markdown(f"""
         <div class="metric-container">
             <div class="metric-card" style="background:#2E8B57;"><div class="icon">💰</div><div class="title">Toplam Borç</div><div class="value">{f_total_tl:,.2f} ₺</div></div>
@@ -134,6 +135,23 @@ if menu == "🏠 Dashboard":
             <div class="metric-card" style="background:linear-gradient(90deg, #1C1C1E, #3A3A3C);"><div class="fx-container"><div class="fx-row"><span>💵 USD:</span> <span>{usd_kur:.4f}</span></div><div class="fx-row"><span>💶 EUR:</span> <span>{eur_kur:.4f}</span></div></div></div>
         </div>
     """, unsafe_allow_html=True)
+
+    # --- BURASI O MEŞHUR ALEVLİ ALERT BAR ---
+    if not filtered_df.empty:
+        valid_v = filtered_df[filtered_df['Vade_Date'].notnull()].copy()
+        valid_v['fark'] = (valid_v['Vade_Date'] - bugun).dt.days
+        # 7 gün ve altı, ama geçmişe gitmeyen (0'dan büyük eşit) vadeleri yakala
+        kritik = valid_v[(valid_v['fark'] <= 7) & (valid_v['fark'] >= 0)]
+        
+        if not kritik.empty:
+            st.markdown(f"""
+                <div class="alert-bar">
+                    <span style="font-size: 20px;">🔥</span>
+                    <span>ACİL ÖDEME: 7 Gün İçinde {len(kritik)} Evrak Var! (Toplam: {kritik['Tutar'].sum():,.2f} ₺)</span>
+                    <span style="font-size: 20px;">🔥</span>
+                </div>
+            """, unsafe_allow_html=True)
+    # ----------------------------------------
 
     col_main, col_side = st.columns([3, 1])
     with col_main:
@@ -145,7 +163,8 @@ if menu == "🏠 Dashboard":
             safe_k = filtered_df[filtered_df['Vade_Date'].notnull()].copy()
             safe_k['fark'] = (safe_k['Vade_Date'] - bugun).dt.days
             k_df = safe_k[(safe_k['fark'] <= 7) & (safe_k['fark'] >= 0)]
-            if not k_df.empty: st.dataframe(k_df[["Firma Adı","Tutar"]], hide_index=True)
+            if not k_df.empty: 
+                st.dataframe(k_df[["Firma Adı","Tutar"]].sort_values("Tutar", ascending=False), hide_index=True)
             else: st.info("Vade yok.")
 
 # --- 8. VERİ YÖNETİMİ SAYFASI ---
