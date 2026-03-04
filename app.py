@@ -165,7 +165,7 @@ if not filtered_df.empty:
     f_total_tl = filtered_df['Tutar'].sum()
     bugun_ts = pd.to_datetime(datetime.now().date())
     # Hata düzeltmesi: .dt.days kullanarak doğrudan çıkarma yapıyoruz
-    gun_farklari = (filtered_df['Vade_Date'] - bugun_ts).dt.days
+    gun_farklari = (filtered_df['Vade_Date'] - bugun).dt.days
     temp_agirlik = (filtered_df['Tutar'] * gun_farklari).sum()
     f_ort_gun = int(round(temp_agirlik / f_total_tl)) if f_total_tl > 0 else 0
     f_ort_vade = bugun_ts + timedelta(days=f_ort_gun)
