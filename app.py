@@ -69,7 +69,7 @@ def load_and_calculate_real():
     raw_df['Tutar'] = pd.to_numeric(raw_df['Tutar'], errors='coerce').fillna(0)
     raw_df['Vade_Date'] = pd.to_datetime(raw_df['Vade'], errors='coerce')
     
-    bugun = pd.to_datetime(datetime.now().date())
+    temp_agirlik_v2 = (filtered_df['Tutar'] * (filtered_df['Vade_Date'] - bugun).dt.days).sum()
     valid = raw_df[raw_df['Tutar'] > 0].copy()
     
     if not valid.empty:
@@ -163,13 +163,8 @@ if tarih_araligi and len(tarih_araligi) == 2:
 # Metrikleri Hesapla
 if not filtered_df.empty:
     f_total_tl = filtered_df['Tutar'].sum()
-    bugun_ts = pd.to_datetime(datetime.now().date())
-    # Hata düzeltmesi: .dt.days kullanarak doğrudan çıkarma yapıyoruz
-    gun_farklari = (filtered_df['Vade_Date'] - bugun).dt.days
-    temp_agirlik = (filtered_df['Tutar'] * gun_farklari).sum()
-    f_ort_gun = int(round(temp_agirlik / f_total_tl)) if f_total_tl > 0 else 0
-    f_ort_vade = bugun_ts + timedelta(days=f_ort_gun)
-    f_adat = (temp_agirlik * 0.3975) / 365
+    bugun = pd.Timestamp(datetime.now().date()) # <-- BURADA DA TANIMLA
+temp_agirlik_v2 = (filtered_df['Tutar'] * (filtered_df['Vade_Date'] - bugun).dt.days).sum()
 else:
     f_total_tl, f_ort_vade, f_ort_gun, f_adat = 0, datetime.now().date(), 0, 0
 
