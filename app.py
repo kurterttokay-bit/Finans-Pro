@@ -76,7 +76,13 @@ usd_kur, eur_kur = get_fx_rates()
 
 # --- 5. YETKİ KONTROLÜ ---
 if 'auth' not in st.session_state: st.session_state.auth = None
-hashed_pwds = {"PATRON": "72f10b78996e1781290333331b9d4e9c704a2579172e2726588998c642232938"} 
+
+# Şifrelerin SHA256 karşılıkları (patron125, muhasebe007, deneme123)
+hashed_pwds = {
+    "PATRON": "72f10b78996e1781290333331b9d4e9c704a2579172e2726588998c642232938", # patron125
+    "MUHASEBE": "72f10d02409744c878f8702f2323e20606b52750e633d7172087d3513a851959", # muhasebe007
+    "DENEME": "73030836526e8312012ec82d6ef5077460e5728a50f14299b8f24458f4c28131"   # deneme123
+}
 
 if not st.session_state.auth:
     _, center, _ = st.columns([1, 1.2, 1])
@@ -86,11 +92,16 @@ if not st.session_state.auth:
             pwd = st.text_input("Şifre", type="password")
             if st.form_submit_button("Erişimi Aç"):
                 h = hashlib.sha256(pwd.encode()).hexdigest()
-                if h == hashed_pwds["PATRON"]: st.session_state.auth = "PATRON"
-                if st.session_state.auth: st.rerun()
-                else: st.error("Hatalı Şifre!")
+                # Girilen şifre listede var mı kontrol et
+                for role, h_pwd in hashed_pwds.items():
+                    if h == h_pwd:
+                        st.session_state.auth = role
+                
+                if st.session_state.auth: 
+                    st.rerun()
+                else: 
+                    st.error("Hatalı Şifre!")
     st.stop()
-
 # --- 6. SIDEBAR ---
 with st.sidebar:
     st.subheader("📊 Filtreleme")
