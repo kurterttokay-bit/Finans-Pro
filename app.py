@@ -23,7 +23,25 @@ st.markdown("""
     @media (max-width: 768px) { .metric-container { grid-template-columns: repeat(2, 1fr); } }
     </style>
 """, unsafe_allow_html=True)
-
+@keyframes border-glow {
+    0% { box-shadow: 0 0 5px #ff4b2b, 0 0 10px #ff4b2b; }
+    50% { box-shadow: 0 0 20px #ff416c, 0 0 30px #ff416c; }
+    100% { box-shadow: 0 0 5px #ff4b2b, 0 0 10px #ff4b2b; }
+}
+.alert-bar {
+    background: linear-gradient(90deg, #4b0000, #990000);
+    color: white;
+    padding: 15px;
+    border-radius: 12px;
+    text-align: center;
+    font-weight: bold;
+    margin-bottom: 20px;
+    border: 2px solid #ff4b2b;
+    animation: border-glow 1.5s infinite;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
 # --- 3. VERİ VE KUR FONKSİYONLARI ---
 @st.cache_data(ttl=300)
 def get_fx_rates():
@@ -139,37 +157,35 @@ if not filtered_df.empty:
 # --- 8. ANA EKRAN ---
 if menu == "🏠 Dashboard":
     st.title("⚖️ Finansal Karar Destek Paneli")
-    st.markdown(f"""
-        <div class="metric-container">
-            <div class="metric-card" style="background:#2E8B57;">
-                <div class="icon">💰</div><div class="title">Toplam Borç</div><div class="value">{f_total_tl:,.2f} ₺</div>
-            </div>
-            <div class="metric-card" style="background:#0A84FF;">
-                <div class="icon">⏳</div><div class="title">Ort. Vade</div><div class="value">{f_ort_vade.strftime('%d %b %Y')}</div>
-            </div>
-            <div class="metric-card" style="background:#F77F00;">
-                <div class="icon">⚠️</div><div class="title">Adat Yükü</div><div class="value">{f_adat:,.2f} ₺</div>
-            </div>
-            <div class="metric-card" style="background:linear-gradient(90deg, #1C1C1E, #3A3A3C);">
-                <div class="fx-container">
-                    <div class="fx-row"><span>💵 USD:</span> <span>{usd_kur:.4f}</span></div>
-                    <div style="border-top: 1px solid rgba(255,255,255,0.1); margin: 4px 15px;"></div>
-                    <div class="fx-row"><span>💶 EUR:</span> <span>{eur_kur:.4f}</span></div>
-                </div>
-            </div>
-        </div>
-    """, unsafe_allow_html=True)
+    
+    # 4 Ana Metrik Kutusu (Mevcut kodun)
+    st.markdown(f""" <div class="metric-container"> ... </div> """, unsafe_allow_html=True)
 
+    # --- YENİ: ALEVLİ ALERT SATIRI ---
+    if not filtered_df.empty:
+        # Geçerli tarihler üzerinden 7 günlük kritik listeyi oluştur
+        valid_df = filtered_df[filtered_df['Vade_Date'].notnull()].copy()
+        valid_df['gun_farki'] = (valid_df['Vade_Date'] - bugun).dt.days
+        kritik_liste = valid_df[(valid_df['gun_farki'] <= 7) & (valid_df['gun_farki'] >= 0)]
+        
+        if not kritik_liste.empty:
+            toplam_acil = kritik_liste['Tutar'].sum()
+            en_yakin_vade = kritik_liste['Vade_Date'].min().strftime('%d.%m.%Y')
+            
+            st.markdown(f"""
+                <div class="alert-bar">
+                    <span style="font-size: 24px;">🔥</span>
+                    <span style="font-size: 18px;">
+                        <b>ACİL ÖDEME UYARISI:</b> 7 Gün İçinde <b>{len(kritik_liste)}</b> Adet Evrakın Vadesi Geliyor! 
+                        (Toplam: <b>{toplam_acil:,.2f} ₺</b>)
+                    </span>
+                    <span style="background: rgba(255,255,255,0.2); padding: 5px 15px; border-radius: 20px;">
+                        İlk Vade: {en_yakin_vade}
+                    </span>
+                    <span style="font-size: 24px;">🔥</span>
+                </div>
+            """, unsafe_allow_html=True)
+
+    # Takip Listesi ve Kritik Vadeler Sütunları
     col_main, col_side = st.columns([3, 1])
-    with col_main:
-        st.subheader("📋 Takip Listesi")
-        st.dataframe(filtered_df, use_container_width=True, hide_index=True)
-    with col_side:
-        st.subheader("⏰ Kritik Vadeler")
-        if not filtered_df.empty:
-            kritik = filtered_df[((filtered_df['Vade_Date'] - bugun).dt.days <= 7) & 
-                                 ((filtered_df['Vade_Date'] - bugun).dt.days >= 0)]
-            st.dataframe(kritik[["Firma Adı", "Tutar"]], hide_index=True) if not kritik.empty else st.write("7 gün vade yok.")
-else:
-    st.title("🌐 Veri Yönetimi")
-    st.markdown(f'<a href="{edit_url}" target="_blank">Google Sheets Düzenle ↗</a>', unsafe_allow_html=True)
+    # ... (Geri kalan tablo kodların)
