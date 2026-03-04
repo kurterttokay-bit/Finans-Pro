@@ -8,7 +8,7 @@ import hashlib
 # --- 1. SAYFA AYARLARI ---
 st.set_page_config(page_title="Finans Pro", layout="wide", page_icon="🏦")
 
-# --- 2. ÖZEL CSS (Burayı düzelttik) ---
+# --- 2. ÖZEL CSS (Alev Efekti ve Metrik Tasarımları) ---
 st.markdown("""
     <style>
     .metric-container { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 20px; }
@@ -19,7 +19,6 @@ st.markdown("""
     .fx-container { display: flex; flex-direction: column; justify-content: center; height: 100%; }
     .fx-row { font-size: 14px; font-weight: 600; display: flex; justify-content: center; gap: 10px; }
     
-    /* ALEV EFEKTİ BURADA OLMALI */
     @keyframes border-glow {
         0% { box-shadow: 0 0 5px #ff4b2b, 0 0 10px #ff4b2b; }
         50% { box-shadow: 0 0 20px #ff416c, 0 0 30px #ff416c; }
@@ -61,8 +60,11 @@ def load_data(url, connection):
         expected_cols = ["Firma Adı","Evrak Tipi","Banka","Tutar","Vade","Açıklama",
                          "Çeki veren","Cirolu","Asıl borçlu","Kime verildi","Evrak No","Döviz","Durum"]
         raw_df = raw_df.rename(columns={c:expected_cols[i] for i,c in enumerate(raw_df.columns) if i < len(expected_cols)})
+        
+        # Veri Temizleme: Tutar nümerik olmalı, Vade tarih olmalı
         raw_df['Tutar'] = pd.to_numeric(raw_df['Tutar'], errors='coerce').fillna(0)
-        raw_df['Vade_Date'] = pd.to_datetime(raw_df['Vade'], errors='coerce')
+        # dayfirst=True Türkiye tarih formatı (GG.AA.YYYY) için kritik
+        raw_df['Vade_Date'] = pd.to_datetime(raw_df['Vade'], errors='coerce', dayfirst=True)
         return raw_df
     except: return pd.DataFrame()
 
@@ -74,17 +76,19 @@ usd_kur, eur_kur = get_fx_rates()
 
 # --- 5. YETKİ KONTROLÜ ---
 if 'auth' not in st.session_state: st.session_state.auth = None
-hashed_pwds = {"PATRON": "72f10b78996e1781290333331b9d4e9c704a2579172e2726588998c642232938"} # Örnektir
+hashed_pwds = {"PATRON": "72f10b78996e1781290333331b9d4e9c704a2579172e2726588998c642232938"} 
 
 if not st.session_state.auth:
     _, center, _ = st.columns([1, 1.2, 1])
     with center:
+        st.markdown("<h4 style='text-align: center;'>🏦 Finans Pro Giriş</h4>", unsafe_allow_html=True)
         with st.form("login"):
             pwd = st.text_input("Şifre", type="password")
             if st.form_submit_button("Erişimi Aç"):
                 h = hashlib.sha256(pwd.encode()).hexdigest()
-                if h == "72f10b78996e1781290333331b9d4e9c704a2579172e2726588998c642232938": st.session_state.auth = "PATRON"
-                st.rerun()
+                if h == hashed_pwds["PATRON"]: st.session_state.auth = "PATRON"
+                if st.session_state.auth: st.rerun()
+                else: st.error("Hatalı Şifre!")
     st.stop()
 
 # --- 6. SIDEBAR ---
@@ -99,9 +103,13 @@ with st.sidebar:
     else:
         secilen_firma, secilen_borclu, secilen_banka = "Tümü", "Tümü", "Tümü"
     tarih_araligi = st.date_input("Tarih Aralığı", [])
+    st.divider()
     menu = st.radio("Navigasyon", ["🏠 Dashboard", "📝 Veri Yönetimi"])
+    if st.button("🔴 Çıkış"):
+        st.session_state.auth = None
+        st.rerun()
 
-# --- 7. VERİ FİLTRELEME VE HESAPLAMA (GÜVENLİ HALE GETİRİLDİ) ---
+# --- 7. VERİ FİLTRELEME VE GÜVENLİ HESAPLAMA ---
 filtered_df = df.copy()
 bugun = pd.Timestamp(datetime.now().date())
 f_total_tl, f_ort_vade, f_adat = 0, bugun, 0
@@ -113,8 +121,7 @@ if not filtered_df.empty:
     if len(tarih_araligi) == 2: 
         filtered_df = filtered_df[(filtered_df["Vade_Date"].dt.date >= tarih_araligi[0]) & (filtered_df["Vade_Date"].dt.date <= tarih_araligi[1])]
 
-    # HESAPLAMA ÖNCESİ TARİH KONTROLÜ (Patlamayı engelleyen kısım)
-    # Sadece geçerli tarihi olan satırları hesaplamaya dahil et
+    # Hesaplama yaparken hatalı tarihli (NaT) satırları hariç tutuyoruz
     calc_df = filtered_df[filtered_df['Vade_Date'].notnull()].copy()
     
     if not calc_df.empty:
@@ -130,7 +137,7 @@ if not filtered_df.empty:
 if menu == "🏠 Dashboard":
     st.title("⚖️ Finans Pro")
     
-    # Metrikleri Göster
+    # 4 Metrik Kutusu
     st.markdown(f"""
         <div class="metric-container">
             <div class="metric-card" style="background:#2E8B57;"><div class="icon">💰</div><div class="title">Toplam Borç</div><div class="value">{f_total_tl:,.2f} ₺</div></div>
@@ -146,20 +153,19 @@ if menu == "🏠 Dashboard":
         </div>
     """, unsafe_allow_html=True)
 
-    # ALEVLİ ALERT SATIRI (Güvenli Filtreleme)
+    # ALEVLİ ALERT SATIRI
     if not filtered_df.empty:
-        # Sadece tarihi olanları kontrol et
         valid_dates = filtered_df[filtered_df['Vade_Date'].notnull()].copy()
         if not valid_dates.empty:
-            valid_dates['gun_farki'] = (valid_dates['Vade_Date'] - bugun).dt.days
-            kritik_liste = valid_dates[(valid_dates['gun_farki'] <= 7) & (valid_dates['gun_farki'] >= 0)]
+            valid_dates['fark'] = (valid_dates['Vade_Date'] - bugun).dt.days
+            kritik_liste = valid_dates[(valid_dates['fark'] <= 7) & (valid_dates['fark'] >= 0)]
             
             if not kritik_liste.empty:
                 st.markdown(f"""
                     <div class="alert-bar">
-                        <span>🔥</span>
+                        <span style="font-size: 24px;">🔥</span>
                         <span>ACİL ÖDEME: 7 Gün İçinde {len(kritik_liste)} Evrak Var! (Toplam: {kritik_liste['Tutar'].sum():,.2f} ₺)</span>
-                        <span>🔥</span>
+                        <span style="font-size: 24px;">🔥</span>
                     </div>
                 """, unsafe_allow_html=True)
 
@@ -169,13 +175,20 @@ if menu == "🏠 Dashboard":
         st.dataframe(filtered_df, use_container_width=True, hide_index=True)
     with col_side:
         st.subheader("⏰ Kritik Vadeler")
+        # Sağ panel için güvenli filtreleme
         if not filtered_df.empty:
-            # Burayı da güvenli hale getirdik
             safe_k = filtered_df[filtered_df['Vade_Date'].notnull()].copy()
             if not safe_k.empty:
                 safe_k['fark'] = (safe_k['Vade_Date'] - bugun).dt.days
-                kritik_df = safe_k[(safe_k['fark'] <= 7) & (safe_k['fark'] >= 0)]
-                if not kritik_df.empty:
-                    st.dataframe(kritik_df[["Firma Adı","Tutar"]], hide_index=True)
-                else: st.write("Vade yok.")
-            else: st.write("Tarih verisi yok.")
+                k_df = safe_k[(safe_k['fark'] <= 7) & (safe_k['fark'] >= 0)]
+                if not k_df.empty:
+                    st.dataframe(k_df[["Firma Adı","Tutar"]].sort_values("Tutar", ascending=False), hide_index=True)
+                else: st.info("7 gün içinde vade yok.")
+            else: st.warning("Tarih verisi hatalı.")
+
+else:
+    st.title("📝 Veri Yönetimi")
+    st.markdown(f'<div style="padding:20px; background:#f0f2f6; border-radius:10px;">'
+                f'Verileri düzenlemek için aşağıdaki bağlantıyı kullanın:<br><br>'
+                f'<a href="{edit_url}" target="_blank" style="font-size:20px; font-weight:bold; color:#ff4b2b;">'
+                f'Google Sheets Düzenleme Paneli ↗</a></div>', unsafe_allow_html=True)
