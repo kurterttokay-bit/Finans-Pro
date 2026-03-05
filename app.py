@@ -1,390 +1,182 @@
-import streamlit as st
-import pandas as pd
-import yfinance as yf
-import google.generativeai as genai
-from datetime import datetime, timedelta
-from PIL import Image
-import json
-import re
-import logging
-import plotly.express as px
-import pytesseract
-import os
-from pdf2image import convert_from_bytes
-
-# -------------------------
-# STREAMLIT CONFIG
-# -------------------------
-
-st.set_page_config(
-    page_title="Finans Enterprise",
-    page_icon="🏦",
-    layout="wide"
-)
-
-logging.basicConfig(level=logging.INFO)
-
-# -------------------------
-# AUTH SYSTEM
-# -------------------------
-
-ROLES = {
-    "patron125": "PATRON",
-    "muhasebe007": "MUHASEBE",
-    "kurter": "YONETICI"
-}
-
-if "auth" not in st.session_state:
-    st.session_state.auth = None
-
-def login():
-
-    col1, col2, col3 = st.columns([1,1.3,1])
-
-    with col2:
-
-        st.title("🏦 Finans Sistemi")
-
-        with st.form("login"):
-
-            pwd = st.text_input("Şifre", type="password")
-            submit = st.form_submit_button("Giriş")
-
-            if submit:
-
-                if pwd in ROLES:
-                    st.session_state.auth = ROLES[pwd]
-                    st.rerun()
-
-                else:
-                    st.error("Hatalı şifre")
-
-if not st.session_state.auth:
-
-    login()
-    st.stop()
-
-# -------------------------
-# GEMINI AI
-# -------------------------
-
-GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-genai.configure(api_key=GEMINI_API_KEY)
-
-model = genai.GenerativeModel("gemini-1.5-flash")
-
-# -------------------------
-# GOOGLE SHEETS
-# -------------------------
-
-from streamlit_gsheets import GSheetsConnection
-
-SHEET_ID = "1gow0J5IA0GaB-BjViSKGbIxoZije0klFGgvDWYHdcNA"
-
-conn = st.connection("gsheets", type=GSheetsConnection)
-
-# -------------------------
-# FX
-# -------------------------
-
-@st.cache_data(ttl=300)
-
-def get_fx():
-
-    usd = float(yf.download("USDTRY=X", period="1d")["Close"].iloc[-1])
-    eur = float(yf.download("EURTRY=X", period="1d")["Close"].iloc[-1])
-
-    return usd, eur
-
-# -------------------------
-# DATA LOAD
-# -------------------------
-
-@st.cache_data(ttl=120)
-
-def load_data():
-
-    df = conn.read(spreadsheet=SHEET_ID)
-
-    if df.empty:
-        return df
-
-    df["Tutar"] = pd.to_numeric(df["Tutar"], errors="coerce").fillna(0)
-
-    if "Vade" in df.columns:
-        df["Vade_Date"] = pd.to_datetime(df["Vade"], dayfirst=True)
-
-    return df
-
-# -------------------------
-# OCR
-# -------------------------
-
-def ocr_read(image):
-
-    text = pytesseract.image_to_string(image)
-
-    return text
-
-# -------------------------
-# AI PARSE
-# -------------------------
-
-def analyze_invoice(image):
-
-    prompt = """
-Extract invoice data.
-
-Return JSON:
-
-{
-"firma":"",
-"urun":"",
-"tutar":number,
-"kdv":number,
-"tarih":"DD.MM.YYYY"
-}
-"""
-
-    response = model.generate_content([prompt,image])
-
-    text = response.text
-
-    json_match = re.search(r"\{.*\}", text, re.S)
-
-    if json_match:
-
-        return json.loads(json_match.group())
-
-    return None
-
-# -------------------------
-# SAVE INVOICE
-# -------------------------
-
-def save_invoice(image):
-
-    if not os.path.exists("invoices"):
-        os.mkdir("invoices")
-
-    path = f"invoices/{datetime.now().timestamp()}.png"
-
-    image.save(path)
-
-    return path
-
-# -------------------------
-# GOOGLE SHEETS WRITE
-# -------------------------
-
-def add_to_sheet(df, result):
-
-    new = pd.DataFrame([{
-
-        "Firma": result["firma"],
-        "Urun": result["urun"],
-        "Tutar": result["tutar"],
-        "KDV": result["kdv"],
-        "Tarih": result["tarih"]
-
-    }])
-
-    df = pd.concat([df,new])
-
-    conn.update(spreadsheet=SHEET_ID,data=df)
-
-# -------------------------
-# AI CFO
-# -------------------------
-
-def ai_cfo(df):
-
-    sample = df.head(50).to_dict()
-
-    prompt = f"""
-
-Sen deneyimli bir CFO'sun.
-
-Şirketin borç tablosu:
-
-{sample}
-
-Analiz et:
-
-1 riskli ödemeler
-2 nakit akışı
-3 öneri
-"""
-
-    response = model.generate_content(prompt)
-
-    return response.text
-
-# -------------------------
-# SIDEBAR
-# -------------------------
-
-with st.sidebar:
-
-    st.title("🏦 Finans Panel")
-
-    st.info(f"Kullanıcı: Kurter\nYetki: {st.session_state.auth}")
-
-    menu = st.radio("Menü",
-
-    [
-    "Dashboard",
-    "AI Evrak Analizi",
-    "AI CFO Chat"
-    ])
-
-    adat_rate = st.number_input("Adat Faizi %",value=39.75)/100
-
-    if st.button("Çıkış"):
-        st.session_state.auth=None
-        st.rerun()
-
-# -------------------------
-# MAIN DATA
-# -------------------------
-
-df = load_data()
-
-usd, eur = get_fx()
-
-if not df.empty:
-
-    kur_map = {
-
-        "USD": usd,
-        "EUR": eur
-
-    }
-
-    df["kur"]=df["Döviz"].map(kur_map).fillna(1)
-
-    df["Tutar_TL"]=df["Tutar"]*df["kur"]
-
-# -------------------------
-# DASHBOARD
-# -------------------------
-
-if menu=="Dashboard":
+if menu == "Dashboard":
+    st.markdown("""
+    <style>
+      .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
+      div[data-testid="stMetric"] {
+        background: rgba(255,255,255,0.05);
+        border: 1px solid rgba(255,255,255,0.08);
+        padding: 14px 14px 10px 14px;
+        border-radius: 16px;
+      }
+      .card {
+        background: rgba(255,255,255,0.05);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 16px;
+        padding: 14px;
+      }
+      .muted { opacity: .75; font-size: .92rem; }
+    </style>
+    """, unsafe_allow_html=True)
 
     st.title("📊 Finans Dashboard")
 
     if df.empty:
+        st.warning("Veri yok / Google Sheets okunamadı. Sheet erişimini kontrol edin.")
+        st.stop()
 
-        st.warning("Veri yok")
+    # -------------------------
+    # Filtre Bar
+    # -------------------------
+    with st.container():
+        c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1])
+        with c1:
+            q = st.text_input("🔎 Firma ara", placeholder="örn: SS GLOBAL")
+        with c2:
+            only_overdue = st.toggle("Sadece gecikenler", value=False)
+        with c3:
+            currency = st.selectbox("Para birimi", ["TL", "Orijinal"], index=0)
+        with c4:
+            horizon = st.selectbox("Vade ufku", ["Hepsi", "0-7 gün", "8-30 gün", "31-90 gün", "90+ gün"], index=0)
 
+    dfx = df.copy()
+
+    # arama
+    if q.strip():
+        col_candidates = [c for c in ["Firma", "firma", "Unvan", "Cari"] if c in dfx.columns]
+        if col_candidates:
+            col = col_candidates[0]
+            dfx = dfx[dfx[col].astype(str).str.contains(q, case=False, na=False)]
+
+    # vade filtre
+    today = pd.Timestamp(datetime.now().date())
+    if "Vade_Date" in dfx.columns:
+        dfx["days_to_due"] = (dfx["Vade_Date"] - today).dt.days
     else:
+        dfx["days_to_due"] = None
 
-        total=df["Tutar_TL"].sum()
+    if only_overdue:
+        dfx = dfx[dfx["days_to_due"].fillna(10**9) < 0]
 
-        today=pd.Timestamp(datetime.now().date())
-
-        valid=df[df["Vade_Date"].notnull()]
-
-        days=(valid["Vade_Date"]-today).dt.days
-
-        overdue=valid[days<0]["Tutar_TL"].sum()
-
-        due7=valid[(days>=0)&(days<=7)]["Tutar_TL"].sum()
-
-        due30=valid[(days>7)&(days<=30)]["Tutar_TL"].sum()
-
-        c1,c2,c3,c4=st.columns(4)
-
-        c1.metric("Toplam Borç",f"{total:,.2f} ₺")
-
-        c2.metric("Geciken",f"{overdue:,.2f} ₺")
-
-        c3.metric("7 Gün",f"{due7:,.2f} ₺")
-
-        c4.metric("30 Gün",f"{due30:,.2f} ₺")
-
-        fig=px.bar(valid.groupby("Vade_Date")["Tutar_TL"].sum().reset_index(),x="Vade_Date",y="Tutar_TL")
-
-        st.plotly_chart(fig,use_container_width=True)
-
-        if st.button("AI CFO Analizi"):
-
-            st.markdown(ai_cfo(df))
-
-        st.dataframe(df)
-
-# -------------------------
-# INVOICE ANALYSIS
-# -------------------------
-
-elif menu=="AI Evrak Analizi":
-
-    st.title("📄 Fatura Analizi")
-
-    file=st.file_uploader("Fatura yükle",type=["png","jpg","jpeg","pdf"])
-
-    if file:
-
-        if file.type=="application/pdf":
-
-            pages=convert_from_bytes(file.read())
-
-            image=pages[0]
-
+    if horizon != "Hepsi":
+        d = dfx["days_to_due"].fillna(10**9)
+        if horizon == "0-7 gün":
+            dfx = dfx[(d >= 0) & (d <= 7)]
+        elif horizon == "8-30 gün":
+            dfx = dfx[(d >= 8) & (d <= 30)]
+        elif horizon == "31-90 gün":
+            dfx = dfx[(d >= 31) & (d <= 90)]
         else:
+            dfx = dfx[d >= 91]
 
-            image=Image.open(file)
+    # tutar kolon seçimi
+    if currency == "TL" and "Tutar_TL" in dfx.columns:
+        amt_col = "Tutar_TL"
+        amt_suffix = "₺"
+    else:
+        amt_col = "Tutar"
+        amt_suffix = ""
 
-        st.image(image,width=400)
+    # -------------------------
+    # KPI Kartları
+    # -------------------------
+    valid = dfx[dfx["Vade_Date"].notnull()].copy()
+    valid["days_to_due"] = (valid["Vade_Date"] - today).dt.days
 
-        if st.button("AI Analiz"):
+    total = float(valid[amt_col].sum()) if not valid.empty else 0.0
+    overdue = float(valid.loc[valid["days_to_due"] < 0, amt_col].sum()) if not valid.empty else 0.0
+    due7 = float(valid.loc[(valid["days_to_due"] >= 0) & (valid["days_to_due"] <= 7), amt_col].sum()) if not valid.empty else 0.0
+    due30 = float(valid.loc[(valid["days_to_due"] > 7) & (valid["days_to_due"] <= 30), amt_col].sum()) if not valid.empty else 0.0
 
-            with st.spinner("AI analiz ediyor"):
+    # Ortalama vade
+    if not valid.empty and total > 0:
+        weighted = float((valid[amt_col] * valid["days_to_due"]).sum())
+        avg_days = weighted / total
+        avg_date = (today + timedelta(days=int(avg_days))).strftime("%d.%m.%Y")
+    else:
+        avg_date = today.strftime("%d.%m.%Y")
 
-                result=analyze_invoice(image)
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Toplam Borç", f"{total:,.2f} {amt_suffix}")
+    k2.metric("🔴 Geciken", f"{overdue:,.2f} {amt_suffix}")
+    k3.metric("🟠 0-7 gün", f"{due7:,.2f} {amt_suffix}")
+    k4.metric("🟡 8-30 gün", f"{due30:,.2f} {amt_suffix}")
+    k5.metric("⏳ Ortalama Vade", avg_date)
 
-                if result:
+    st.markdown("---")
 
-                    st.json(result)
+    # -------------------------
+    # Grafik Alanı
+    # -------------------------
+    left, right = st.columns([1.25, 1])
 
-                    if st.button("Excel'e Kaydet"):
+    with left:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.subheader("📅 Ödeme Takvimi")
+        if not valid.empty:
+            pay = valid.groupby("Vade_Date")[amt_col].sum().reset_index()
+            fig = px.bar(pay, x="Vade_Date", y=amt_col)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Grafik için vade tarihi olan kayıt yok.")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-                        add_to_sheet(df,result)
+    with right:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.subheader("🧨 Risk Dağılımı")
 
-                        save_invoice(image)
+        if not valid.empty:
+            bins = pd.cut(
+                valid["days_to_due"],
+                bins=[-10**6, -1, 7, 30, 90, 10**6],
+                labels=["Geciken", "0-7", "8-30", "31-90", "90+"]
+            )
+            risk = valid.groupby(bins)[amt_col].sum().reset_index()
+            risk.columns = ["Risk", "Tutar"]
+            fig2 = px.pie(risk, names="Risk", values="Tutar", hole=0.55)
+            st.plotly_chart(fig2, use_container_width=True)
+        else:
+            st.info("Risk analizi için veri yok.")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-                        st.success("Kaydedildi")
+    st.markdown("---")
 
-                else:
+    # -------------------------
+    # Firma / Ürün dağılımı + Riskli kalemler
+    # -------------------------
+    a, b = st.columns([1, 1])
 
-                    st.error("Veri çıkarılamadı")
+    with a:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.subheader("🏢 İlk 10 Firma")
+        # Firma kolonu senin sheet’e göre değişebilir:
+        firma_col = next((c for c in ["Firma", "firma", "Unvan", "Cari"] if c in valid.columns), None)
+        if firma_col:
+            top = valid.groupby(firma_col)[amt_col].sum().sort_values(ascending=False).head(10).reset_index()
+            fig3 = px.bar(top, x=firma_col, y=amt_col)
+            st.plotly_chart(fig3, use_container_width=True)
+        else:
+            st.info("Firma kolonu bulunamadı (Sheet kolon adını kontrol edin).")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-# -------------------------
-# AI CFO CHAT
-# -------------------------
+    with b:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.subheader("⚠️ En Riskli Kalemler (Geciken / Yakın Vade)")
+        if not valid.empty:
+            risk_table = valid.sort_values("days_to_due").head(12)
+            cols = [c for c in [firma_col, "Vade_Date", "days_to_due", amt_col, "Döviz"] if c and c in risk_table.columns]
+            st.dataframe(risk_table[cols], use_container_width=True, height=360)
+        else:
+            st.info("Gösterilecek riskli kalem yok.")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-elif menu=="AI CFO Chat":
-
-    st.title("🧠 AI CFO")
-
-    question=st.text_input("Soru sor")
-
-    if question:
-
-        prompt=f"""
-
-Bir CFO gibi cevap ver.
-
-Soru:
-
-{question}
-
-Veri:
-
-{df.head(50).to_dict()}
-
-"""
-
-        response=model.generate_content(prompt)
-
-        st.markdown(response.text)
+    # -------------------------
+    # AI CFO (buton) - mevcut fonksiyonun aynen kalsın
+    # -------------------------
+    st.markdown("---")
+    cta1, cta2 = st.columns([1, 2])
+    with cta1:
+        if st.button("🧠 AI CFO Analizi Yap", use_container_width=True):
+            with st.spinner("AI analiz ediyor..."):
+                st.markdown(ai_cfo_analysis(df))
+    with cta2:
+        st.markdown('<div class="muted">İpucu: Filtreleyip sonra AI CFO çalıştırırsan analiz çok daha isabetli olur.</div>', unsafe_allow_html=True)
