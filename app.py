@@ -183,6 +183,43 @@ def inject_theme_css(theme: str):
             margin-top: 6px;
             margin-bottom: 10px;
         }}
+        /* Card containers (Streamlit bordered containers) */
+div[data-testid="stVerticalBlockBorderWrapper"]{
+    background: {card};
+    border: 1px solid {border};
+    border-radius: 18px;
+    padding: 16px;
+    box-shadow: {shadow};
+}
+section[data-testid="stSidebar"] div[data-testid="stVerticalBlockBorderWrapper"]{
+    background: {card2};
+    border: 1px solid {border};
+    box-shadow: none;
+    padding: 14px;
+}
+
+/* File uploader polish */
+section[data-testid="stFileUploader"] div[data-testid="stFileUploaderDropzone"]{
+    background: rgba(255,255,255,0.04);
+    border: 1px dashed {border} !important;
+    border-radius: 16px !important;
+    padding: 14px !important;
+}
+
+/* Dataframe polish */
+div[data-testid="stDataFrame"]{
+    border-radius: 16px;
+    overflow: hidden;
+    border: 1px solid {border};
+}
+
+/* Text sizing */
+.card-title { margin:0; font-size: 1.15rem; letter-spacing: 0.2px; }
+.kpi-cap { font-size: 0.84rem; color: {muted}; }
+.kpi-val { font-size: 1.35rem; font-weight: 700; margin-top: 6px; }
+
+/* Hide legacy HTML wrappers (they cannot wrap widgets across calls) */
+.card, .card-soft, .title-row { display:none !important; }
         </style>
         """,
         unsafe_allow_html=True
@@ -511,19 +548,38 @@ def read_template_xlsx(uploaded_file) -> pd.DataFrame:
 # UI HELPERS
 # -------------------------
 def kpi(label, value, delta=None, help_text=None):
-    st.markdown('<div class="kpi">', unsafe_allow_html=True)
-    st.caption(label if not help_text else f"{label} · {help_text}")
-    st.subheader(value)
-    if delta is not None:
-        st.markdown(f"<div class='muted'>{delta}</div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+    """KPI kutusu: tek markdown ile render (HTML wrapper sorunlarını önler)."""
+    caption = label if not help_text else f"{label} · {help_text}"
+    delta_html = f"<div class='muted' style='margin-top:6px'>{delta}</div>" if delta is not None else ""
+    st.markdown(
+        f"""
+        <div class="kpi">
+          <div class="kpi-cap">{caption}</div>
+          <div class="kpi-val">{value}</div>
+          {delta_html}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 def card_header(title: str, badge: str | None = None, subtitle: str | None = None):
-    st.markdown('<div class="title-row">', unsafe_allow_html=True)
-    st.markdown(f"<h3 style='margin:0'>{title}</h3>", unsafe_allow_html=True)
-    if badge:
-        st.markdown(f"<span class='badge'>{badge}</span>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+    """Kart başlığı: tek markdown ile render (stabil)."""
+    badge_html = f"<span class='badge'>{badge}</span>" if badge else ""
+    subtitle_html = f"<div class='muted' style='margin-top:6px'>{subtitle}</div>" if subtitle else ""
+    line_html = "<div class='accent-line' style='margin-top:10px'></div>" if subtitle else ""
+    st.markdown(
+        f"""
+        <div class="card-head">
+          <div class="card-head-row">
+            <h3 class="card-title">{title}</h3>
+            {badge_html}
+          </div>
+          {subtitle_html}
+          {line_html}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
     if subtitle:
         st.markdown(f"<div class='muted'>{subtitle}</div>", unsafe_allow_html=True)
         st.markdown("<div class='accent-line'></div>", unsafe_allow_html=True)
@@ -538,9 +594,8 @@ with st.sidebar:
     st.session_state.theme_mode = st.radio("Tema", ["Dark", "Light"], horizontal=True, index=0 if st.session_state.theme_mode == "Dark" else 1)
     inject_theme_css(st.session_state.theme_mode)
 
-    st.markdown("<div class='card-soft'>", unsafe_allow_html=True)
-    st.markdown(f"**Kullanıcı:** Kurter  \n**Yetki:** {ROLE}", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+    with st.container(border=True):
+        st.markdown(f"**Kullanıcı:** Kurter  \\n**Yetki:** {ROLE}")
 
     menu = st.radio("Menü", ["Dashboard", "İşlem Merkezi", "AI Evrak Analizi", "AI CFO Chat"])
     adat_rate = st.number_input("Adat Faizi %", value=39.75) / 100
@@ -774,227 +829,213 @@ elif menu == "İşlem Merkezi":
     st.markdown("<div class='muted'>4 farklı akış: Excel şablon → Upload → Sheets, doğrudan Sheets, tarama ile otomatik ekleme.</div>", unsafe_allow_html=True)
     st.markdown("<div class='accent-line'></div>", unsafe_allow_html=True)
 
-    # 4 cards layout
-    a, b = st.columns(2)
-    c, d = st.columns(2)
+    a, b = st.columns(2, gap="large")
+    c, d = st.columns(2, gap="large")
 
-    # ---- Kutu 1: Template Excel indir
     with a:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        card_header("1) Taslak Excel indir", badge="Şablon", subtitle="İndir, doldur, sonra upload et.")
-        st.download_button(
-            "📥 Taslağı indir (.xlsx)",
-            data=make_template_xlsx(),
-            file_name="finans_sablon.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
-        st.markdown("<div class='muted'>Sheet adı: <b>Sayfa1</b>. Kolonlar otomatik normalize edilir.</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+        with st.container(border=True):
+            card_header("1) Taslak Excel indir", badge="Şablon", subtitle="İndir, doldur, sonra upload et.")
+            st.download_button(
+                "📥 Taslağı indir (.xlsx)",
+                data=make_template_xlsx(),
+                file_name="finans_sablon.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+            st.markdown("<div class='muted'>Sheet adı: <b>Sayfa1</b>. Kolonlar otomatik normalize edilir.</div>", unsafe_allow_html=True)
 
-    # ---- Kutu 2: Upload Excel -> Google Sheets
     with b:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        card_header("2) Excel Upload → Google Sheets'e işle", badge="Import", subtitle="Doldurduğun Excel'i yükle, önizle ve aktar.")
-        up = st.file_uploader("Excel yükle (.xlsx)", type=["xlsx"], key="upl_xlsx")
-        mode = st.selectbox("Aktarım modu", ["Ekle (append)", "Yerine yaz (overwrite)"], index=0)
-        if up:
-            try:
-                incoming = read_template_xlsx(up)
-                incoming_view = incoming.drop(columns=["Vade_Date"], errors="ignore")
-                st.markdown("<div class='muted'>Önizleme (ilk 20 satır):</div>", unsafe_allow_html=True)
-                st.dataframe(incoming_view.head(20), use_container_width=True, height=230)
+        with st.container(border=True):
+            card_header("2) Excel Upload → Google Sheets'e işle", badge="Import", subtitle="Doldurduğun Excel'i yükle, önizle ve aktar.")
+            up = st.file_uploader("Excel yükle (.xlsx)", type=["xlsx"], key="upl_xlsx")
+            mode = st.selectbox("Aktarım modu", ["Ekle (append)", "Yerine yaz (overwrite)"], index=0)
 
-                # filter blank rows
-                nonblank = incoming.copy()
-                # consider a row blank if Firma Adı and Tutar and Vade all empty/zero
-                mask_blank = (
-                    nonblank["Firma Adı"].astype(str).str.strip().eq("") &
-                    (pd.to_numeric(nonblank["Tutar"], errors="coerce").fillna(0) == 0) &
-                    nonblank["Vade"].astype(str).str.strip().eq("")
-                )
-                nonblank = nonblank.loc[~mask_blank].copy()
+            if up:
+                try:
+                    incoming = read_template_xlsx(up)
+                    incoming_view = incoming.drop(columns=["Vade_Date"], errors="ignore")
 
-                st.markdown(f"<div class='muted'>Yüklü satır: <b>{len(incoming)}</b> · Boş sayılan satır hariç: <b>{len(nonblank)}</b></div>", unsafe_allow_html=True)
+                    st.markdown("<div class='muted'>Önizleme (ilk 20 satır):</div>", unsafe_allow_html=True)
+                    st.dataframe(incoming_view.head(20), use_container_width=True, height=230)
 
-                if st.button("✅ Google Sheets'e aktar", use_container_width=True, key="btn_import"):
-                    if mode.startswith("Yerine"):
-                        out = nonblank.copy()
+                    nonblank = incoming.copy()
+                    mask_blank = (
+                        nonblank["Firma Adı"].astype(str).str.strip().eq("") &
+                        (pd.to_numeric(nonblank["Tutar"], errors="coerce").fillna(0) == 0) &
+                        nonblank["Vade"].astype(str).str.strip().eq("")
+                    )
+                    nonblank = nonblank.loc[~mask_blank].copy()
+
+                    st.markdown(
+                        f"<div class='muted'>Yüklü satır: <b>{len(incoming)}</b> · Boş sayılan satır hariç: <b>{len(nonblank)}</b></div>",
+                        unsafe_allow_html=True
+                    )
+
+                    if st.button("✅ Google Sheets'e aktar", use_container_width=True, key="btn_import"):
+                        if mode.startswith("Yerine"):
+                            out = normalize_sheet(nonblank.drop(columns=["Vade_Date"], errors="ignore"))
+                        else:
+                            base = df.copy().drop(columns=["Vade_Date"], errors="ignore")
+                            out = pd.concat([base, nonblank.drop(columns=["Vade_Date"], errors="ignore")], ignore_index=True)
+                            out = normalize_sheet(out)
+
+                        ok, err = save_data(out)
+                        if ok:
+                            st.success("Aktarıldı ve kaydedildi.")
+                            st.rerun()
+                        else:
+                            st.error(f"Kaydedilemedi: {err}")
+                except Exception as e:
+                    st.error(f"Excel okunamadı: {e}")
+
+    with c:
+        with st.container(border=True):
+            card_header("3) Google Sheets'te devam et", badge="Live", subtitle="Sheet'i aç, doğrudan oradan düzenle.")
+            sheets_url = st.secrets.get("SHEETS_URL", "")
+            if sheets_url:
+                st.link_button("🔗 Google Sheets'i aç", sheets_url, use_container_width=True)
+                st.markdown("<div class='muted'>Sheets'te düzenle — Dashboard otomatik yansır.</div>", unsafe_allow_html=True)
+            else:
+                st.warning("SHEETS_URL secrets içinde yok. Streamlit → Settings → Secrets → SHEETS_URL")
+
+    with d:
+        with st.container(border=True):
+            card_header("4) Tarama → Otomatik Sheets'e ekle", badge="AI + OCR", subtitle="PDF/Foto yükle, AI alanları çıkarıp kaydetsin. Olmazsa manuel gir.")
+            types = ["png", "jpg", "jpeg"]
+            if PDF_ENABLED:
+                types.append("pdf")
+            scan_file = st.file_uploader("Evrak yükle (PDF/Resim)", type=types, key="scan_file")
+
+            do_ocr = st.checkbox("OCR kullan (varsa)", value=False, disabled=not OCR_ENABLED, key="scan_ocr")
+            archive = st.checkbox("Görseli arşivle", value=True, key="scan_archive")
+
+            if scan_file and st.button("🧠 Tara & çıkar", use_container_width=True, key="btn_scan"):
+                raw_image = None
+                if scan_file.type == "application/pdf":
+                    if not PDF_ENABLED:
+                        st.error("PDF desteği kapalı. packages.txt içine poppler-utils ekleyip Reboot edin.")
                     else:
-                        base = df.copy().drop(columns=["Vade_Date"], errors="ignore")
-                        out = pd.concat([base, nonblank.drop(columns=["Vade_Date"], errors="ignore")], ignore_index=True)
-                        out = normalize_sheet(out)
+                        pdf_bytes = scan_file.read()
+                        try:
+                            raw_image = pdf_first_page_to_image(pdf_bytes, dpi=350)
+                        except Exception as e:
+                            st.error(f"PDF görsele çevrilemedi: {e}")
+                else:
+                    try:
+                        raw_image = Image.open(scan_file).convert("RGB")
+                    except Exception as e:
+                        st.error(f"Görsel açılamadı: {e}")
 
-                    ok, err = save_data(out)
+                if raw_image is not None:
+                    image = enhance_for_reading(raw_image)
+                    qr_list = decode_qr_opencv(raw_image) or decode_qr_opencv(image)
+                    ocr_text = ""
+                    if do_ocr:
+                        with st.spinner("OCR okunuyor..."):
+                            ocr_text = ocr_read(image)
+
+                    with st.spinner("AI alanları çıkarıyor..."):
+                        result = analyze_invoice(image, ocr_text=ocr_text, qr_list=qr_list)
+
+                    if result:
+                        st.success("✅ Alanlar çıkarıldı. Kaydetmeden önce gözden geçir.")
+                        st.session_state["_scan_result"] = result
+                        st.session_state["_scan_image"] = image
+                    else:
+                        st.warning("Tarama başarısız / düşük kalite. Aşağıdan manuel giriş yapabilirsin.")
+                        st.session_state["_scan_result"] = None
+                        st.session_state["_scan_image"] = None
+
+            result = st.session_state.get("_scan_result")
+            image = st.session_state.get("_scan_image")
+            if result:
+                st.divider()
+                st.markdown("<div class='muted'>Hızlı düzeltme:</div>", unsafe_allow_html=True)
+
+                e1, e2 = st.columns(2)
+                with e1:
+                    result["Firma Adı"] = st.text_input("Firma Adı", value=result.get("Firma Adı", ""), key="sr_firma")
+                    result["Evrak Tipi"] = st.selectbox("Evrak Tipi", ["Fatura", "Çek", "Senet", "Diğer"], index=0, key="sr_tip")
+                    result["Döviz"] = st.text_input("Döviz", value=result.get("Döviz", "TL"), key="sr_doviz")
+                    result["Durum"] = st.selectbox("Durum", ["Beklemede", "Ödendi", "Takas"], index=0, key="sr_durum")
+                with e2:
+                    result["Tutar"] = st.number_input("Tutar", value=float(result.get("Tutar", 0.0)), step=100.0, key="sr_tutar")
+                    result["Vade"] = st.text_input("Vade (DD.MM.YYYY)", value=result.get("Vade", datetime.now().strftime("%d.%m.%Y")), key="sr_vade")
+                    result["Evrak No"] = st.text_input("Evrak No", value=result.get("Evrak No", ""), key="sr_no")
+                    result["Açıklama"] = st.text_input("Açıklama", value=result.get("Açıklama", ""), key="sr_ack")
+
+                if st.button("💾 Sheets'e kaydet", use_container_width=True, key="btn_scan_save"):
+                    df2 = df.copy().drop(columns=["Vade_Date"], errors="ignore")
+                    df2 = pd.concat([df2, pd.DataFrame([result])], ignore_index=True)
+                    df2 = normalize_sheet(df2)
+
+                    ok, err = save_data(df2)
                     if ok:
-                        st.success("Aktarıldı ve kaydedildi.")
+                        if archive and image is not None:
+                            path = archive_invoice(image)
+                            st.info(f"Arşivlendi: {path}")
+                        st.success("Kaydedildi.")
+                        st.session_state["_scan_result"] = None
+                        st.session_state["_scan_image"] = None
                         st.rerun()
                     else:
                         st.error(f"Kaydedilemedi: {err}")
-            except Exception as e:
-                st.error(f"Excel okunamadı: {e}")
-        st.markdown("</div>", unsafe_allow_html=True)
 
-    # ---- Kutu 3: Open Google Sheets
-    with c:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        card_header("3) Google Sheets'te devam et", badge="Live", subtitle="Sheet'i aç, doğrudan oradan düzenle.")
-        sheets_url = st.secrets.get("SHEETS_URL", "")
-        if sheets_url:
-            st.link_button("🔗 Google Sheets'i aç", sheets_url, use_container_width=True)
-            st.markdown("<div class='muted'>İstersen Sheets'te düzenle, Dashboard otomatik yansır.</div>", unsafe_allow_html=True)
-        else:
-            st.warning("SHEETS_URL secrets içinde yok. Eklemek için: Streamlit → Settings → Secrets → SHEETS_URL")
-        st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
 
-    # ---- Kutu 4: Scan / auto add; fallback to manual form
-    with d:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        card_header("4) Tarama → Otomatik Sheets'e ekle", badge="AI + OCR", subtitle="PDF/Foto yükle, AI alanları çıkarıp kaydetsin. Olmazsa manuel gir.")
-        types = ["png", "jpg", "jpeg"]
-        if PDF_ENABLED:
-            types.append("pdf")
-        scan_file = st.file_uploader("Evrak yükle (PDF/Resim)", type=types, key="scan_file")
+    with st.container(border=True):
+        card_header("Manuel giriş (fallback)", badge="Form", subtitle="Tarama olmazsa veya hızlı eklemek istersen.")
+        with st.expander("➕ Yeni kayıt ekle", expanded=False):
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                firma = st.text_input("Firma Adı", key="m_firma")
+                evrak_tipi = st.selectbox("Evrak Tipi", ["Çek", "Senet", "Fatura", "Diğer"], index=0, key="m_tip")
+                banka = st.text_input("Banka", key="m_banka")
+            with c2:
+                tutar = st.number_input("Tutar", value=0.0, step=1000.0, key="m_tutar")
+                doviz = st.selectbox("Döviz", ["TL", "USD", "EUR", "Dolar", "Euro"], index=0, key="m_doviz")
+                vade = st.text_input("Vade (DD.MM.YYYY)", key="m_vade")
+            with c3:
+                aciklama = st.text_input("Açıklama", key="m_ack")
+                evrak_no = st.text_input("Evrak No", key="m_no")
+                durum = st.selectbox("Durum", ["Beklemede", "Ödendi", "Takas"], index=0, key="m_durum")
+            with c4:
+                ceki_veren = st.text_input("Çeki veren", key="m_ceki")
+                cirolu = st.text_input("Cirolu", key="m_cirolu")
+                asil_borclu = st.text_input("Asıl borçlu", key="m_asil")
+                kime_verildi = st.text_input("Kime verildi", key="m_kime")
 
-        do_ocr = st.checkbox("OCR kullan (varsa)", value=False, disabled=not OCR_ENABLED, key="scan_ocr")
-        archive = st.checkbox("Görseli arşivle", value=True, key="scan_archive")
-
-        if scan_file and st.button("🧠 Tara & çıkar", use_container_width=True, key="btn_scan"):
-            raw_image = None
-            if scan_file.type == "application/pdf":
-                if not PDF_ENABLED:
-                    st.error("PDF desteği kapalı. packages.txt içine poppler-utils ekleyip Reboot edin.")
-                else:
-                    pdf_bytes = scan_file.read()
-                    try:
-                        raw_image = pdf_first_page_to_image(pdf_bytes, dpi=350)
-                    except Exception as e:
-                        st.error(f"PDF görsele çevrilemedi: {e}")
-            else:
-                try:
-                    raw_image = Image.open(scan_file).convert("RGB")
-                except Exception as e:
-                    st.error(f"Görsel açılamadı: {e}")
-
-            if raw_image is not None:
-                image = enhance_for_reading(raw_image)
-                qr_list = decode_qr_opencv(raw_image) or decode_qr_opencv(image)
-                ocr_text = ""
-                if do_ocr:
-                    with st.spinner("OCR okunuyor..."):
-                        ocr_text = ocr_read(image)
-
-                with st.spinner("AI alanları çıkarıyor..."):
-                    result = analyze_invoice(image, ocr_text=ocr_text, qr_list=qr_list)
-
-                if result:
-                    st.success("✅ Alanlar çıkarıldı. Kaydetmeden önce gözden geçir.")
-                    st.session_state["_scan_result"] = result
-                    st.session_state["_scan_image"] = image
-                else:
-                    st.warning("Tarama başarısız / düşük kalite. Aşağıdan manuel giriş yapabilirsin.")
-                    st.session_state["_scan_result"] = None
-                    st.session_state["_scan_image"] = None
-
-        # If scan result exists, show quick editor + save
-        result = st.session_state.get("_scan_result")
-        image = st.session_state.get("_scan_image")
-        if result:
-            st.markdown("<hr/>", unsafe_allow_html=True)
-            st.markdown("<div class='muted'>Hızlı düzeltme:</div>", unsafe_allow_html=True)
-
-            e1, e2 = st.columns(2)
-            with e1:
-                result["Firma Adı"] = st.text_input("Firma Adı", value=result.get("Firma Adı", ""), key="sr_firma")
-                result["Evrak Tipi"] = st.selectbox("Evrak Tipi", ["Fatura", "Çek", "Senet", "Diğer"], index=0, key="sr_tip")
-                result["Döviz"] = st.text_input("Döviz", value=result.get("Döviz", "TL"), key="sr_doviz")
-                result["Durum"] = st.selectbox("Durum", ["Beklemede", "Ödendi", "Takas"], index=0, key="sr_durum")
-            with e2:
-                result["Tutar"] = st.number_input("Tutar", value=float(result.get("Tutar", 0.0)), step=100.0, key="sr_tutar")
-                result["Vade"] = st.text_input("Vade (DD.MM.YYYY)", value=result.get("Vade", datetime.now().strftime("%d.%m.%Y")), key="sr_vade")
-                result["Evrak No"] = st.text_input("Evrak No", value=result.get("Evrak No", ""), key="sr_no")
-                result["Açıklama"] = st.text_input("Açıklama", value=result.get("Açıklama", ""), key="sr_ack")
-
-            if st.button("💾 Sheets'e kaydet", use_container_width=True, key="btn_scan_save"):
-                df2 = df.copy().drop(columns=["Vade_Date"], errors="ignore")
-                df2 = pd.concat([df2, pd.DataFrame([result])], ignore_index=True)
+            if st.button("💾 Kaydet", use_container_width=True, key="m_save"):
+                new_row = {
+                    "Firma Adı": firma,
+                    "Evrak Tipi": evrak_tipi,
+                    "Banka": banka,
+                    "Tutar": float(tutar),
+                    "Vade": vade,
+                    "Açıklama": aciklama,
+                    "Çeki veren": ceki_veren,
+                    "Cirolu": cirolu,
+                    "Asıl borçlu": asil_borclu,
+                    "Kime verildi": kime_verildi,
+                    "Evrak No": evrak_no,
+                    "Döviz": doviz,
+                    "Durum": durum
+                }
+                df2 = df.copy()
+                df2 = pd.concat([df2.drop(columns=["Vade_Date"], errors="ignore"), pd.DataFrame([new_row])], ignore_index=True)
                 df2 = normalize_sheet(df2)
 
                 ok, err = save_data(df2)
                 if ok:
-                    if archive and image is not None:
-                        path = archive_invoice(image)
-                        st.info(f"Arşivlendi: {path}")
-                    st.success("Kaydedildi.")
-                    # clear scan state
-                    st.session_state["_scan_result"] = None
-                    st.session_state["_scan_image"] = None
+                    st.success("Kayıt eklendi.")
                     st.rerun()
                 else:
                     st.error(f"Kaydedilemedi: {err}")
 
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.divider()
+        st.subheader("📌 Mevcut Kayıtlar")
+        st.dataframe(df.drop(columns=["Vade_Date"], errors="ignore"), use_container_width=True, height=420)
 
-    st.markdown("---")
-
-    # Manual entry always available (fallback)
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    card_header("Manuel giriş (fallback)", badge="Form", subtitle="Tarama olmazsa veya hızlı eklemek istersen.")
-    with st.expander("➕ Yeni kayıt ekle", expanded=False):
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            firma = st.text_input("Firma Adı", key="m_firma")
-            evrak_tipi = st.selectbox("Evrak Tipi", ["Çek", "Senet", "Fatura", "Diğer"], index=0, key="m_tip")
-            banka = st.text_input("Banka", key="m_banka")
-        with c2:
-            tutar = st.number_input("Tutar", value=0.0, step=1000.0, key="m_tutar")
-            doviz = st.selectbox("Döviz", ["TL", "USD", "EUR", "Dolar", "Euro"], index=0, key="m_doviz")
-            vade = st.text_input("Vade (DD.MM.YYYY)", key="m_vade")
-        with c3:
-            aciklama = st.text_input("Açıklama", key="m_ack")
-            evrak_no = st.text_input("Evrak No", key="m_no")
-            durum = st.selectbox("Durum", ["Beklemede", "Ödendi", "Takas"], index=0, key="m_durum")
-        with c4:
-            ceki_veren = st.text_input("Çeki veren", key="m_ceki")
-            cirolu = st.text_input("Cirolu", key="m_cirolu")
-            asil_borclu = st.text_input("Asıl borçlu", key="m_asil")
-            kime_verildi = st.text_input("Kime verildi", key="m_kime")
-
-        if st.button("💾 Kaydet", use_container_width=True, key="m_save"):
-            new_row = {
-                "Firma Adı": firma,
-                "Evrak Tipi": evrak_tipi,
-                "Banka": banka,
-                "Tutar": float(tutar),
-                "Vade": vade,
-                "Açıklama": aciklama,
-                "Çeki veren": ceki_veren,
-                "Cirolu": cirolu,
-                "Asıl borçlu": asil_borclu,
-                "Kime verildi": kime_verildi,
-                "Evrak No": evrak_no,
-                "Döviz": doviz,
-                "Durum": durum
-            }
-            df2 = df.copy()
-            df2 = pd.concat([df2.drop(columns=["Vade_Date"], errors="ignore"), pd.DataFrame([new_row])], ignore_index=True)
-            df2 = normalize_sheet(df2)
-
-            ok, err = save_data(df2)
-            if ok:
-                st.success("Kayıt eklendi.")
-                st.rerun()
-            else:
-                st.error(f"Kaydedilemedi: {err}")
-
-    st.divider()
-    st.subheader("📌 Mevcut Kayıtlar")
-    st.dataframe(df.drop(columns=["Vade_Date"], errors="ignore"), use_container_width=True, height=420)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-# -------------------------
-# AI EVRAK ANALİZİ (ayrı sayfa, detay)
-# -------------------------
 elif menu == "AI Evrak Analizi":
     st.title("📄 AI Evrak Analizi")
     st.markdown("<div class='muted'>Detaylı önizleme + OCR/QR + manuel düzeltme.</div>", unsafe_allow_html=True)
