@@ -722,110 +722,119 @@ elif menu == "İşlem Merkezi":
 elif menu == "AI Evrak Analizi":
     st.title("📄 AI Evrak Analizi")
 
+    # desteklenen dosyalar
     types = ["png", "jpg", "jpeg"]
     if PDF_ENABLED:
         types.append("pdf")
 
     uploaded = st.file_uploader("Fatura yükle", type=types)
 
-    if uploaded:
-        # load image
-        image = None
-        raw_image = None
-
-if uploaded.type == "application/pdf":
-    if not PDF_ENABLED:
-        st.error("PDF desteği kapalı. packages.txt -> poppler-utils gerekli.")
+    if not uploaded:
+        st.info("Bir fatura yükleyin (PDF veya resim).")
         st.stop()
-    pdf_bytes = uploaded.read()
-    raw_image = pdf_first_page_to_image(pdf_bytes, dpi=350)
-else:
-    raw_image = Image.open(uploaded).convert("RGB")
 
-# iyileştirilmiş versiyon
-image = enhance_for_reading(raw_image)
+    # --- Dosyayı görüntüye çevir
+    raw_image = None
+    if uploaded.type == "application/pdf":
+        if not PDF_ENABLED:
+            st.error("PDF desteği kapalı. packages.txt içine poppler-utils ekleyip Reboot edin.")
+            st.stop()
 
-# ekranda ikisini de göster (farkı gör)
-c1, c2 = st.columns(2)
-with c1:
-    st.caption("Orijinal")
-    st.image(raw_image, use_container_width=True)
-with c2:
-    st.caption("İyileştirilmiş (AI/OCR için)")
-    st.image(image, use_container_width=True)
+        pdf_bytes = uploaded.read()
+        try:
+            raw_image = pdf_first_page_to_image(pdf_bytes, dpi=350)
+        except Exception as e:
+            st.error(f"PDF görsele çevrilemedi: {e}")
+            st.stop()
+    else:
+        raw_image = Image.open(uploaded).convert("RGB")
 
-# QR oku
-qr_list = decode_qr(raw_image) or decode_qr(image)
-if qr_list:
-    st.success("✅ QR bulundu")
-    st.write(qr_list)
-else:
-    st.warning("QR bulunamadı (zbar/pyzbar kurulu mu, QR çok küçük mü?)")
+    # --- İyileştirilmiş görüntü (AI/OCR için)
+    image = enhance_for_reading(raw_image)
 
-        st.image(image, width=420)
+    # --- Ön izleme
+    c1, c2 = st.columns(2)
+    with c1:
+        st.caption("Orijinal")
+        st.image(raw_image, use_container_width=True)
+    with c2:
+        st.caption("İyileştirilmiş (AI/OCR için)")
+        st.image(image, use_container_width=True)
 
-        colA, colB, colC = st.columns([1, 1, 1])
-        with colA:
-            do_ocr = st.checkbox("OCR kullan (varsa)", value=False, disabled=not OCR_ENABLED)
-        with colB:
-            archive = st.checkbox("Görseli arşivle", value=True)
-        with colC:
-            st.caption(f"Model: {MODEL_NAME}")
+    # --- Kontroller
+    colA, colB, colC = st.columns([1, 1, 1])
+    with colA:
+        do_ocr = st.checkbox("OCR kullan (varsa)", value=False, disabled=not OCR_ENABLED)
+    with colB:
+        archive = st.checkbox("Görseli arşivle", value=True)
+    with colC:
+        st.caption(f"Model: {MODEL_NAME}")
 
-        if do_ocr:
-            with st.spinner("OCR okunuyor..."):
-                txt = ocr_read(image)
-                if txt.strip():
-                    st.text_area("OCR Metni", txt, height=180)
-                else:
-                    st.info("OCR metni alınamadı (kurulum yok veya görsel uygun değil).")
+    # --- QR Oku (OpenCV)
+    qr_list = decode_qr_opencv(raw_image) or decode_qr_opencv(image)
+    if qr_list:
+        st.success("✅ QR bulundu")
+        st.write(qr_list[0])
+    else:
+        st.warning("QR bulunamadı (QR çok küçük/flu olabilir. PDF için DPI 350 iyi, gerekirse 400 yaparız).")
 
-        if st.button("🧠 AI ile Analiz Et", use_container_width=True):
-            with st.spinner("AI analiz ediyor..."):
-                result = analyze_invoice(image)
+    # --- OCR
+    ocr_text = ""
+    if do_ocr:
+        with st.spinner("OCR okunuyor..."):
+            ocr_text = ocr_read(image)
+        if ocr_text.strip():
+            st.text_area("OCR Metni", ocr_text, height=180)
+        else:
+            st.info("OCR metni alınamadı (tesseract kurulu değil veya görsel uygun değil).")
 
-            if not result:
-                st.error("AI veri çıkaramadı. Görseli daha net deneyin.")
+    # --- AI Analiz
+    if st.button("🧠 AI ile Analiz Et", use_container_width=True):
+        with st.spinner("AI analiz ediyor..."):
+            result = analyze_invoice(image, ocr_text=ocr_text, qr_list=qr_list)
+
+        if not result:
+            st.error("AI veri çıkaramadı. DPI artırmayı (PDF: 400) veya daha net dosya denemeyi deneyin.")
+            st.stop()
+
+        st.success("AI veriyi çıkardı.")
+        st.json(result)
+
+        # --- Kaydetmeden önce düzelt
+        st.subheader("✍️ Kaydetmeden önce düzelt")
+        e1, e2, e3, e4 = st.columns(4)
+        with e1:
+            result["Firma Adı"] = st.text_input("Firma Adı", value=result.get("Firma Adı", ""))
+            result["Evrak Tipi"] = st.selectbox("Evrak Tipi", ["Fatura", "Çek", "Senet", "Diğer"], index=0)
+            result["Döviz"] = st.text_input("Döviz", value=result.get("Döviz", "TL"))
+        with e2:
+            result["Tutar"] = st.number_input("Tutar", value=float(result.get("Tutar", 0.0)), step=100.0)
+            result["Vade"] = st.text_input("Vade", value=result.get("Vade", datetime.now().strftime("%d.%m.%Y")))
+            result["Durum"] = st.selectbox("Durum", ["Beklemede", "Ödendi", "Takas"], index=0)
+        with e3:
+            result["Evrak No"] = st.text_input("Evrak No", value=result.get("Evrak No", ""))
+            result["Banka"] = st.text_input("Banka", value=result.get("Banka", ""))
+            result["Açıklama"] = st.text_input("Açıklama", value=result.get("Açıklama", ""))
+        with e4:
+            result["Çeki veren"] = st.text_input("Çeki veren", value=result.get("Çeki veren", ""))
+            result["Cirolu"] = st.text_input("Cirolu", value=result.get("Cirolu", ""))
+            result["Asıl borçlu"] = st.text_input("Asıl borçlu", value=result.get("Asıl borçlu", ""))
+            result["Kime verildi"] = st.text_input("Kime verildi", value=result.get("Kime verildi", ""))
+
+        if st.button("💾 Google Sheets'e Kaydet", use_container_width=True):
+            df2 = df.copy().drop(columns=["Vade_Date"], errors="ignore")
+            df2 = pd.concat([df2, pd.DataFrame([result])], ignore_index=True)
+            df2 = normalize_sheet(df2)
+
+            ok, err = save_data(df2)
+            if ok:
+                if archive:
+                    path = archive_invoice(image)
+                    st.info(f"Arşivlendi: {path}")
+                st.success("Kaydedildi.")
+                st.rerun()
             else:
-                st.success("AI veriyi çıkardı.")
-                st.json(result)
-
-                # allow user edits before save
-                st.subheader("✍️ Kaydetmeden önce düzelt")
-                e1, e2, e3, e4 = st.columns(4)
-                with e1:
-                    result["Firma Adı"] = st.text_input("Firma Adı", value=result.get("Firma Adı", ""))
-                    result["Evrak Tipi"] = st.selectbox("Evrak Tipi", ["Fatura", "Çek", "Senet", "Diğer"], index=0)
-                    result["Döviz"] = st.text_input("Döviz", value=result.get("Döviz", "TL"))
-                with e2:
-                    result["Tutar"] = st.number_input("Tutar", value=float(result.get("Tutar", 0.0)), step=100.0)
-                    result["Vade"] = st.text_input("Vade", value=result.get("Vade", datetime.now().strftime("%d.%m.%Y")))
-                    result["Durum"] = st.selectbox("Durum", ["Beklemede", "Ödendi", "Takas"], index=0)
-                with e3:
-                    result["Evrak No"] = st.text_input("Evrak No", value=result.get("Evrak No", ""))
-                    result["Banka"] = st.text_input("Banka", value=result.get("Banka", ""))
-                    result["Açıklama"] = st.text_input("Açıklama", value=result.get("Açıklama", ""))
-                with e4:
-                    result["Çeki veren"] = st.text_input("Çeki veren", value=result.get("Çeki veren", ""))
-                    result["Cirolu"] = st.text_input("Cirolu", value=result.get("Cirolu", ""))
-                    result["Asıl borçlu"] = st.text_input("Asıl borçlu", value=result.get("Asıl borçlu", ""))
-                    result["Kime verildi"] = st.text_input("Kime verildi", value=result.get("Kime verildi", ""))
-
-                if st.button("💾 Google Sheets'e Kaydet", use_container_width=True):
-                    df2 = df.copy().drop(columns=["Vade_Date"], errors="ignore")
-                    df2 = pd.concat([df2, pd.DataFrame([result])], ignore_index=True)
-                    df2 = normalize_sheet(df2)
-
-                    ok, err = save_data(df2)
-                    if ok:
-                        if archive:
-                            path = archive_invoice(image)
-                            st.info(f"Arşivlendi: {path}")
-                        st.success("Kaydedildi.")
-                        st.rerun()
-                    else:
-                        st.error(f"Kaydedilemedi: {err}")
-
+                st.error(f"Kaydedilemedi: {err}")
 # -------------------------
 # AI CFO Chat
 # -------------------------
