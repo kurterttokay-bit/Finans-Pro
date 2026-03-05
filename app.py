@@ -11,7 +11,7 @@ from PIL import Image
 st.set_page_config(page_title="Finans Pro", layout="wide", page_icon="🏦")
 
 # --- GEMINI YAPILANDIRMASI ---
-# Buradaki API key senin ücretsiz kotan dahilinde çalışır.
+# Gemini 1.5 Flash kullanarak faturayı dijital veriye dönüştürüyoruz.
 genai.configure(api_key="AIzaSyCgKGlkcNNmSdv8HKTm8j4RidpR7lMqYHM")
 
 # --- 2. ÖZEL CSS (TASARIM) ---
@@ -22,7 +22,6 @@ st.markdown("""
 .metric-card .icon { font-size: 22px; margin-bottom: 2px; }
 .metric-card .title { font-size: 13px; opacity: 0.8; font-weight: 400; }
 .metric-card .value { font-size: 16px; font-weight: 700; margin: 2px 0; }
-.fx-container { display: flex; flex-direction: column; justify-content: center; height: 100%; }
 .fx-row { font-size: 14px; font-weight: 600; display: flex; justify-content: center; gap: 10px; }
 @keyframes border-glow {
     0% { box-shadow: 0 0 5px #ff4b2b, 0 0 10px #ff4b2b; }
@@ -35,13 +34,12 @@ st.markdown("""
 }
 .manage-card { 
     background: #1E1E1E; border: 1px solid #333; padding: 20px; border-radius: 15px; 
-    text-align: center; transition: 0.3s; color: white; height: 160px;
+    text-align: center; color: white; min-height: 140px;
 }
-.manage-card:hover { border-color: #ff4b2b; transform: translateY(-5px); }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. YARDIMCI FONKSİYONLAR ---
+# --- 3. FONKSİYONLAR ---
 @st.cache_data(ttl=300)
 def get_fx_rates():
     try:
@@ -61,86 +59,112 @@ def load_data(url, connection):
         return raw_df
     except: return pd.DataFrame()
 
-# --- 4. VERİ VE BAĞLANTI ---
+def analyze_invoice(image_file):
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    prompt = "Bu faturayı oku ve sadece şu JSON formatında cevap ver: {'firma_adi': '...', 'tutar': 0.0, 'vade': 'YYYY-MM-DD', 'borclu': '...'}"
+    img = Image.open(image_file)
+    response = model.generate_content([prompt, img])
+    try:
+        clean_json = response.text.replace('```json', '').replace('```', '').strip()
+        return json.loads(clean_json)
+    except: return None
+
+# --- 4. VERİ BAĞLANTISI ---
 edit_url = "https://docs.google.com/spreadsheets/d/1gow0J5IA0GaB-BjViSKGbIxoZije0klFGgvDWYHdcNA/edit#gid=0"
 conn = st.connection("gsheets", type=GSheetsConnection)
 df = load_data(edit_url, conn)
 usd_kur, eur_kur = get_fx_rates()
 
-# --- 5. ŞİFRE KONTROLÜ (GÜNCELLENDİ) ---
+# --- 5. YETKİ (Şifreler Düzeldi) ---
 if 'auth' not in st.session_state: st.session_state.auth = None
-sifreler = {
-    "deneme123": "DENEME", 
-    "patron125": "PATRON", 
-    "muhasebe007": "MUHASEBE"
-}
+sifreler = {"deneme123": "DENEME", "patron125": "PATRON", "muhasebe007": "MUHASEBE"}
 
 if not st.session_state.auth:
     _, center, _ = st.columns([1, 1.2, 1])
     with center:
         with st.form("login"):
-            pwd = st.text_input("Sistem Şifresi", type="password")
-            if st.form_submit_button("Giriş Yap"):
+            pwd = st.text_input("Giriş Şifresi", type="password")
+            if st.form_submit_button("Erişimi Aç"):
                 if pwd in sifreler:
                     st.session_state.auth = sifreler[pwd]
                     st.rerun()
                 else: st.error("Hatalı Şifre!")
     st.stop()
 
-# --- 6. NAVİGASYON ---
+# --- 6. SIDEBAR ---
 with st.sidebar:
     st.title("🏦 Finans Pro")
-    menu = st.radio("Menü", ["🏠 Dashboard", "📝 Veri Yönetimi"])
-    if st.button("🔴 Güvenli Çıkış"):
+    menu = st.radio("Navigasyon", ["🏠 Dashboard", "📝 Veri Yönetimi", "📸 AI Fatura Tarama"])
+    st.divider()
+    if st.button("🔴 Çıkış"):
         st.session_state.auth = None
         st.rerun()
 
 # --- 7. DASHBOARD ---
 if menu == "🏠 Dashboard":
-    st.title("⚖️ Finansal Durum Paneli")
+    st.title("⚖️ Finans Dashboard")
     bugun = pd.Timestamp(datetime.now().date())
     
     if not df.empty:
         total_tl = df['Tutar'].sum()
-        valid_df = df[df['Vade_Date'].notnull()].copy()
+        valid_v = df[df['Vade_Date'].notnull()].copy()
         
-        if not valid_df.empty:
-            gun_fark = (valid_df['Vade_Date'] - bugun).dt.days
-            ort_gun = int((valid_df['Tutar'] * gun_fark).sum() / total_tl) if total_tl > 0 else 0
-            ort_vade = bugun + timedelta(days=ort_gun)
-            adat = ((valid_df['Tutar'] * gun_fark).sum() * 0.3975) / 365
+        if not valid_v.empty:
+            gun_fark = (valid_v['Vade_Date'] - bugun).dt.days
+            ort_vade = bugun + timedelta(days=int((valid_v['Tutar'] * gun_fark).sum() / total_tl)) if total_tl > 0 else bugun
+            adat = ((valid_v['Tutar'] * gun_fark).sum() * 0.3975) / 365
         else:
             ort_vade, adat = bugun, 0
 
         st.markdown(f"""
         <div class="metric-container">
-            <div class="metric-card" style="background:#2E8B57;"><div class="title">Toplam Yük</div><div class="value">{total_tl:,.2f} ₺</div></div>
+            <div class="metric-card" style="background:#2E8B57;"><div class="title">Toplam Borç</div><div class="value">{total_tl:,.2f} ₺</div></div>
             <div class="metric-card" style="background:#0A84FF;"><div class="title">Ort. Vade</div><div class="value">{ort_vade.strftime('%d.%m.%Y')}</div></div>
-            <div class="metric-card" style="background:#F77F00;"><div class="title">Adat (Faiz)</div><div class="value">{adat:,.2f} ₺</div></div>
+            <div class="metric-card" style="background:#F77F00;"><div class="title">Adat Yükü</div><div class="value">{adat:,.2f} ₺</div></div>
             <div class="metric-card" style="background:#1C1C1E;"><div class="fx-row">USD: {usd_kur:.4f}</div><div class="fx-row">EUR: {eur_kur:.4f}</div></div>
         </div>
         """, unsafe_allow_html=True)
 
-        kritik = valid_df[(valid_df['Vade_Date'] - bugun).dt.days <= 7]
-        if not kritik.empty:
-            st.markdown(f'<div class="alert-bar">🔥 DİKKAT: 7 GÜN İÇİNDE {len(kritik)} ÖDEME VAR!</div>', unsafe_allow_html=True)
-
-        st.subheader("📋 Güncel Evrak Listesi")
+        st.subheader("📋 Takip Listesi")
         st.dataframe(df, use_container_width=True, hide_index=True)
 
 # --- 8. VERİ YÖNETİMİ ---
-else:
-    st.title("📝 Evrak ve Veri Girişi")
-    c1, c2, c3 = st.columns(3)
-    with c1: st.info("📂 Excel ile toplu yükleme yapabilirsiniz.")
-    with c2: st.link_button("🌐 Google Sheets'i Aç", edit_url)
-    with c3: show_form = st.toggle("Manuel Giriş Formunu Aç")
+elif menu == "📝 Veri Yönetimi":
+    st.title("📝 Veri Yönetimi")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.link_button("🌐 Google Sheets'i Aç", edit_url, use_container_width=True)
+    with c2:
+        show_form = st.toggle("Manuel Giriş Formu")
 
     if show_form:
-        with st.form("manual"):
+        with st.form("manuel_entry"):
             f1, f2, f3 = st.columns(3)
-            with f1: st.text_input("Firma")
+            with f1: st.text_input("Firma Adı")
             with f2: st.number_input("Tutar", min_value=0.0)
             with f3: st.date_input("Vade")
-            if st.form_submit_button("Kaydet"):
-                st.success("Sisteme eklendi!")
+            st.form_submit_button("Kaydet")
+
+# --- 9. AI FATURA TARAMA (Buraya eklendi!) ---
+else:
+    st.title("📸 AI Fatura Tarama")
+    st.info("Fatura resmini yükleyin, Gemini verileri otomatik ayrıştırsın.")
+    
+    uploaded_file = st.file_uploader("Fatura Görseli Seç (JPG, PNG)", type=["jpg", "jpeg", "png"])
+    
+    if uploaded_file is not None:
+        st.image(uploaded_file, caption="Yüklenen Fatura", width=300)
+        if st.button("Faturayı Analiz Et"):
+            with st.spinner("AI verileri okuyor..."):
+                result = analyze_invoice(uploaded_file)
+                if result:
+                    st.success("Veriler başarıyla çekildi!")
+                    st.json(result)
+                    # Formu doldurma önerisi
+                    with st.expander("Onayla ve Kaydet"):
+                        st.text_input("Firma", value=result.get('firma_adi', ''))
+                        st.number_input("Tutar", value=float(result.get('tutar', 0.0)))
+                        st.text_input("Asıl Borçlu", value=result.get('borclu', ''))
+                        st.button("Sheets'e Gönder")
+                else:
+                    st.error("Fatura okunamadı, lütfen tekrar deneyin.")
