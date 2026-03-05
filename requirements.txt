@@ -5,3 +5,5 @@ yfinance==0.2.37
 st-gsheets-connection
 google-generativeai
 Pillow
+xlsxwriter
+openpyxl
