@@ -103,6 +103,37 @@ def inject_theme_css(theme: str):
         color: {muted} !important;
     }}
 
+
+    /* Layout: center + comfortable width */
+    div.block-container {{
+        padding-top: 1.2rem;
+        padding-bottom: 2.0rem;
+        max-width: 1180px;
+    }}
+
+    /* Typography: more SaaS-like scale */
+    h1 {{ font-size: 2.0rem; margin-bottom: .2rem; }}
+    h2 {{ font-size: 1.35rem; margin-top: 1.1rem; }}
+    h3 {{ font-size: 1.05rem; }}
+
+    /* Card header */
+    .card-head {{ margin-bottom: 0.75rem; }}
+    .card-head-row {{ display:flex; align-items:center; justify-content:space-between; gap:.75rem; }}
+    .card-title {{ font-size: 1.15rem; font-weight: 750; letter-spacing: -0.02em; line-height: 1.2; }}
+    .card-subtitle {{ margin-top: 0.35rem; font-size: 0.95rem; }}
+    .badge {{
+        font-size: 0.75rem;
+        padding: 0.20rem 0.55rem;
+        border-radius: 999px;
+        border: 1px solid {border};
+        background: rgba(255,255,255,.04);
+        color: {text};
+        white-space: nowrap;
+    }}
+
+    /* Reduce “giant” widget labels a bit */
+    label, .stMarkdown p {{ font-size: 0.95rem; }}
+
     /* Make native bordered containers look like cards */
     div[data-testid="stVerticalBlockBorderWrapper"] {{
         background: {card};
@@ -472,27 +503,23 @@ def kpi(label, value, delta=None, help_text=None):
         unsafe_allow_html=True
     )
 
+
 def card_header(title: str, badge: str | None = None, subtitle: str | None = None):
-    """Kart başlığı: tek markdown ile render (stabil)."""
+    """Kart başlığı: tek markdown ile render (Streamlit HTML wrapper sorunlarını önler)."""
     badge_html = f"<span class='badge'>{badge}</span>" if badge else ""
-    subtitle_html = f"<div class='muted' style='margin-top:6px'>{subtitle}</div>" if subtitle else ""
-    line_html = "<div class='accent-line' style='margin-top:10px'></div>" if subtitle else ""
+    subtitle_html = f"<div class='card-subtitle muted'>{subtitle}</div>" if subtitle else ""
     st.markdown(
         f"""
         <div class="card-head">
           <div class="card-head-row">
-            <h3 class="card-title">{title}</h3>
+            <div class="card-title">{title}</div>
             {badge_html}
           </div>
           {subtitle_html}
-          {line_html}
         </div>
         """,
         unsafe_allow_html=True
     )
-    if subtitle:
-        st.markdown(f"<div class='muted'>{subtitle}</div>", unsafe_allow_html=True)
-        st.markdown("<div class='accent-line'></div>", unsafe_allow_html=True)
 
 # -------------------------
 # SIDEBAR (menu + settings)
