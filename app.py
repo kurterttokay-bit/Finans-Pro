@@ -1181,7 +1181,7 @@ elif menu == "İşlem Merkezi":
         <div class="hero">
           <div>
             <h1>İşlem Merkezi</h1>
-            <p>Evraklarını 4 farklı yolla aynı düzene (Google Sheets) aktar: şablon Excel, Excel upload, doğrudan Sheets, tarama + otomatik ekleme.</p>
+            
           </div>
         </div>
         """,
@@ -1224,7 +1224,7 @@ elif menu == "İşlem Merkezi":
         "<div class='flowcards'>"
         + "".join(
             [
-                f"""<a class='flowcard {'selected' if k==st.session_state.op_flow else ''}' href='{_build_href(theme=theme_param, flow=k)}'>
+                f"""<a target='_self' class='flowcard {'selected' if k==st.session_state.op_flow else ''}' href='{_build_href(theme=theme_param, flow=k)}#flow-panel'>
                         <div class='flow-top'>
                           <div style='display:flex;align-items:center;gap:10px'>
                             <div class='flow-ico'>{ico}</div>
@@ -1249,7 +1249,24 @@ elif menu == "İşlem Merkezi":
     }
     st.markdown(f"<div class='muted' style='margin-top:0px;margin-bottom:12px'>{step_desc.get(step,'')}</div>", unsafe_allow_html=True)
 
+    # Smooth scroll to panel if URL has #flow-panel
+    components.v1.html(
+        """<script>
+        (function(){
+          try{
+            if (window.location.hash === '#flow-panel') {
+              const el = document.getElementById('flow-panel');
+              if(el){ el.scrollIntoView({behavior:'smooth', block:'start'}); }
+            }
+          }catch(e){}
+        })();
+        </script>""",
+        height=0,
+    )
+
     # --- Content area ---
+
+    st.markdown("<div id='flow-panel'></div>", unsafe_allow_html=True)
 
     with st.container(border=True):
         if step == "1) Şablon indir":
