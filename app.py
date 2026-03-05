@@ -161,25 +161,38 @@ def normalize_sheet(df: pd.DataFrame) -> pd.DataFrame:
 # -------------------------
 @st.cache_data(ttl=120)
 def load_data():
-    try:
-        # secrets.toml içinde spreadsheet verildiyse conn.read() yeterli
-        # worksheet ismi verilmezse default sayfayı okur; biz Sayfa1 diyoruz
-        df = conn.read(worksheet=WORKSHEET_NAME)
-        return normalize_sheet(df)
-    except Exception as e:
-        logging.exception(e)
-        return normalize_sheet(pd.DataFrame(columns=CANON_COLS))
+    last_err = None
 
+    def try_read(**kwargs):
+        nonlocal last_err
+        try:
+            raw = conn.read(**kwargs)
+            return raw, None
+        except Exception as e:
+            last_err = e
+            return None, e
 
-def save_data(df: pd.DataFrame):
-    # cache invalidate
-    try:
-        conn.update(worksheet=WORKSHEET_NAME, data=df[CANON_COLS])
-        st.cache_data.clear()
-        return True, ""
-    except Exception as e:
-        logging.exception(e)
-        return False, str(e)
+    # 1) default (worksheet belirtmeden)
+    raw, err = try_read()
+    if raw is not None and not raw.empty:
+        st.session_state["_gsheets_last_error"] = ""
+        return normalize_sheet(raw)
+
+    # 2) Sayfa1 dene
+    raw, err = try_read(worksheet="Sayfa1")
+    if raw is not None and not raw.empty:
+        st.session_state["_gsheets_last_error"] = ""
+        return normalize_sheet(raw)
+
+    # 3) Sheet1 dene
+    raw, err = try_read(worksheet="Sheet1")
+    if raw is not None and not raw.empty:
+        st.session_state["_gsheets_last_error"] = ""
+        return normalize_sheet(raw)
+
+    # 4) Hepsi başarısız → hata mesajını sakla
+    st.session_state["_gsheets_last_error"] = str(last_err) if last_err else "Boş veri döndü (Sheet boş olabilir)."
+    return normalize_sheet(pd.DataFrame(columns=CANON_COLS))
 
 
 # -------------------------
