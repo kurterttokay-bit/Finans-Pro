@@ -356,30 +356,41 @@ def inject_theme_css(theme: str):
         line-height: 1.3;
     }}
     
-    /* ---- Segmented step selector (horizontal radio) ---- */
-    div[data-testid="stRadio"] > div[role="radiogroup"] {{
-        gap: 10px;
-        flex-wrap: nowrap;
+
+    /* ---- Flow selector (Islem Merkezi) - scoped to radio key: flow_radio_pick ---- */
+    div[data-testid="stRadio"]:has(input[id^="flow_radio_pick"]) > div[role="radiogroup"] {{
+        display: flex;
+        gap: 14px;
+        flex-wrap: wrap;
     }}
-    div[data-testid="stRadio"] label {{
+    div[data-testid="stRadio"]:has(input[id^="flow_radio_pick"]) label {{
         border: 1px solid {border};
         background: {card};
-        border-radius: 14px;
-        padding: 14px 14px;
-        min-height: 66px;
+        border-radius: 18px;
+        padding: 18px 18px;
+        min-height: 92px;
         align-items: flex-start;
         box-shadow: {shadow};
+        flex: 1 1 240px;
+        max-width: 420px;
     }}
-    div[data-testid="stRadio"] label p {{
-        font-weight: 600;
+    div[data-testid="stRadio"]:has(input[id^="flow_radio_pick"]) label p {{
+        font-weight: 700;
+        font-size: 22px;
+        line-height: 1.15;
         margin-top: -2px;
     }}
-    div[data-testid="stRadio"] label:hover {{
-        border-color: rgba(59,130,246,.45);
+    div[data-testid="stRadio"]:has(input[id^="flow_radio_pick"]) label:hover {{
+        border-color: rgba(59,130,246,.55);
+        transform: translateY(-1px);
+        transition: transform .12s ease;
     }}
-    div[data-testid="stRadio"] input:checked + div {{
-        border-radius: 12px;
+    div[data-testid="stRadio"]:has(input[id^="flow_radio_pick"]) input:checked + div {{
+        border-radius: 16px;
+        outline: 2px solid rgba(99,102,241,.55);
+        outline-offset: 2px;
     }}
+
 
 
     /* ---- Flow cards (Islem Merkezi) ---- */
@@ -1188,59 +1199,38 @@ elif menu == "İşlem Merkezi":
         unsafe_allow_html=True
     )
 
-    # --- Flow cards selector (click card -> opens panel below) ---
-    flow_map = {
-        "template": "1) Şablon indir",
-        "upload": "2) Upload & işle",
-        "sheets": "3) Sheets’te devam",
-        "scan": "4) Tara & ekle",
-    }
 
-    qp = _get_query_params()
-    flow_q = qp.get("flow")
-    if isinstance(flow_q, (list, tuple)):
-        flow_q = flow_q[0] if flow_q else None
-
-    if "op_flow" not in st.session_state:
-        st.session_state.op_flow = "template"
-
-    if flow_q in flow_map:
-        st.session_state.op_flow = flow_q
-
-    step = flow_map.get(st.session_state.op_flow, "1) Şablon indir")
-
-    # Card definitions (emoji icons keep it dependency-free)
-    cards = [
-        ("template", "📄", "1) Şablon indir", "Excel’i indir, offline doldur.", "Şablon"),
-        ("upload", "⬆️", "2) Upload & işle", "Yükle, önizle, Sheets’e aktar.", "Import"),
-        ("sheets", "🟩", "3) Sheets’te devam", "Doğrudan Google Sheets’te düzenle.", "Live"),
-        ("scan", "📷", "4) Tara & ekle", "PDF/Foto → alan çıkar → Sheets.", "AI+OCR"),
+    # --- Flow selector (NO navigation; stays in same Streamlit session) ---
+    flow_defs = [
+        ("template", "📄  Şablon indir", "Şablon", "Excel’i indir, offline doldur."),
+        ("upload",    "⬆️  Upload & işle", "Import", "Yükle, önizle, Sheets’e aktar."),
+        ("sheets",    "🟩  Sheets’te devam", "Live", "Google Sheets’i aynı sekmede aç."),
+        ("scan",      "📷  Tara & ekle", "AI+OCR", "PDF/Foto → alan çıkar → Sheets."),
     ]
 
-    # Ensure theme persists in href
-    theme_param = "dark" if st.session_state.theme_mode == "Dark" else "light"
+    # Persist selection in session_state (default = upload if user came from elsewhere)
+    if "op_flow" not in st.session_state:
+        st.session_state.op_flow = "upload"
 
-    st.markdown(
-        "<div class='flowcards'>"
-        + "".join(
-            [
-                f"""<a target='_self' class='flowcard {'selected' if k==st.session_state.op_flow else ''}' href='{_build_href(theme=theme_param, flow=k)}#flow-panel'>
-                        <div class='flow-top'>
-                          <div style='display:flex;align-items:center;gap:10px'>
-                            <div class='flow-ico'>{ico}</div>
-                            <div class='flow-ttl'>{ttl}</div>
-                          </div>
-                          <div class='flow-pill'>{pill}</div>
-                        </div>
-                        <div class='flow-sub'>{sub}</div>
-                      </a>"""
-                for (k, ico, ttl, sub, pill) in cards
-            ]
-        )
-        + "</div>",
-        unsafe_allow_html=True,
+    # Horizontal radio styled as big cards via CSS (.flow-radio label)
+    flow_labels = [d[1] for d in flow_defs]
+    flow_keys   = [d[0] for d in flow_defs]
+    default_idx = flow_keys.index(st.session_state.op_flow) if st.session_state.op_flow in flow_keys else 0
+
+    picked_label = st.radio(
+        "",
+        flow_labels,
+        index=default_idx,
+        horizontal=True,
+        label_visibility="collapsed",
+        key="flow_radio_pick",
     )
+    picked_key = flow_keys[flow_labels.index(picked_label)]
+    if picked_key != st.session_state.op_flow:
+        st.session_state.op_flow = picked_key
+        st.session_state._scroll_flow_panel = True
 
+    step = flow_map.get(st.session_state.op_flow, "2) Upload & işle")
     step_desc = {
         "1) Şablon indir": "Excel şablonunu indir, offline doldur.",
         "2) Upload & işle": "Doldurduğun Excel’i yükle, önizle, Sheets’e aktar.",
@@ -1249,22 +1239,24 @@ elif menu == "İşlem Merkezi":
     }
     st.markdown(f"<div class='muted' style='margin-top:0px;margin-bottom:12px'>{step_desc.get(step,'')}</div>", unsafe_allow_html=True)
 
-    # Smooth scroll to panel if URL has #flow-panel
-    components.v1.html(
-        """<script>
-        (function(){
-          try{
-            if (window.location.hash === '#flow-panel') {
-              const el = document.getElementById('flow-panel');
-              if(el){ el.scrollIntoView({behavior:'smooth', block:'start'}); }
-            }
-          }catch(e){}
-        })();
-        </script>""",
-        height=0,
-    )
+
+    # Smooth scroll to panel when a flow is picked (no URL navigation; no new tab; no re-auth)
+    if st.session_state.get("_scroll_flow_panel"):
+        components.v1.html(
+            """<script>
+            (function(){
+              try{
+                const el = document.getElementById('flow-panel');
+                if(el){ el.scrollIntoView({behavior:'smooth', block:'start'}); }
+              }catch(e){}
+            })();
+            </script>""",
+            height=0,
+        )
+        st.session_state._scroll_flow_panel = False
 
     # --- Content area ---
+
 
     st.markdown("<div id='flow-panel'></div>", unsafe_allow_html=True)
 
