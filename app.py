@@ -14,7 +14,7 @@ import plotly.express as px
 # CONFIG
 # -------------------------
 st.set_page_config(
-    page_title="Finans Enterprise Pro",
+    page_title="Finans Enterprise",
     page_icon="🏦",
     layout="wide"
 )
@@ -52,21 +52,23 @@ if not st.session_state.auth:
     st.stop()
 
 # -------------------------
-# API CONFIG (DINAMIK MODEL KONTROLÜ)
+# API CONFIG (DİNAMİK MODEL KONTROLÜ EKLENDİ)
 # -------------------------
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 genai.configure(api_key=GEMINI_API_KEY)
 
-# 404 Hatasını önlemek için kullanılabilir modelleri tara
-MODEL_NAME = "gemini-1.5-flash" 
+# Hangi modelin çalıştığını otomatik bulan güvenli blok
 try:
     available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
     if "models/gemini-1.5-flash" in available_models:
         MODEL_NAME = "models/gemini-1.5-flash"
     elif "gemini-1.5-flash" in available_models:
         MODEL_NAME = "gemini-1.5-flash"
+    else:
+        MODEL_NAME = "gemini-pro" 
 except Exception as e:
-    logging.error(f"Model listesi alınamadı: {e}")
+    MODEL_NAME = "gemini-1.5-flash"
+    logging.error(f"Model listeleme hatası: {e}")
 
 model = genai.GenerativeModel(MODEL_NAME)
 
@@ -87,7 +89,7 @@ def get_fx():
         return usd, eur
     except Exception as e:
         logging.error(e)
-        return 34.80, 37.60 # Güncel varsayılan kurlar
+        return 34.0, 37.0
 
 # -------------------------
 # DATA LOAD
@@ -109,10 +111,10 @@ def load_data():
         return pd.DataFrame()
 
 # -------------------------
-# AI ANALYSIS FUNCTIONS
+# AI ANALYSIS
 # -------------------------
 def analyze_invoice(image):
-    prompt = """Extract invoice/check info. Return ONLY JSON: {"firma": "str", "tutar": float, "vade": "DD.MM.YYYY", "banka": "str"}"""
+    prompt = """Extract invoice information. Return ONLY JSON. {"firma": "", "tutar": number, "vade": "DD.MM.YYYY", "banka": ""}"""
     try:
         response = model.generate_content([prompt, image])
         try:
@@ -120,15 +122,15 @@ def analyze_invoice(image):
         except:
             text = response.candidates[0].content.parts[0].text
         json_match = re.search(r"\{.*\}", text, re.S)
-        return json.loads(json_match.group()) if json_match else None
+        if json_match:
+            return json.loads(json_match.group())
     except Exception as e:
-        st.error(f"Evrak Analiz Hatası ({MODEL_NAME}): {e}")
-        return None
+        st.error(f"AI Analiz Hatası ({MODEL_NAME}): {e}")
+    return None
 
 def ai_cfo_analysis(df):
-    if df.empty: return "Analiz edilecek veri yok."
     sample = df.head(50).to_dict()
-    prompt = f"Sen bir CFO AI'sısın. Şu borç tablosunu analiz et: {sample}. Nakit akış riskini ve likidite durumunu Türkçe olarak kısa ve öz açıkla."
+    prompt = f"Sen bir CFO AI'sısın. Şu borç tablosunu analiz et: {sample}. Nakit akışı ve ödeme risklerini kısa ve öz açıkla."
     try:
         response = model.generate_content(prompt)
         return response.text
@@ -136,7 +138,19 @@ def ai_cfo_analysis(df):
         return f"CFO Analiz Hatası ({MODEL_NAME}): {e}"
 
 # -------------------------
-# MAIN LOGIC
+# SIDEBAR
+# -------------------------
+with st.sidebar:
+    st.title("🏦 Finans Panel")
+    st.info(f"Yetki: {st.session_state.auth}")
+    menu = st.radio("Menü", ["Dashboard", "İşlem Merkezi"])
+    adat_rate = st.number_input("Adat Faizi %", value=39.75) / 100
+    if st.button("Çıkış"):
+        st.session_state.auth = None
+        st.rerun()
+
+# -------------------------
+# DATA PREP & DASHBOARD & OPERATION
 # -------------------------
 df = load_data()
 usd, eur = get_fx()
@@ -146,27 +160,11 @@ if not df.empty:
     df["kur"] = df["Döviz"].map(kur_map).fillna(1)
     df["Tutar_TL"] = df["Tutar"] * df["kur"]
 
-# -------------------------
-# SIDEBAR
-# -------------------------
-with st.sidebar:
-    st.title("🏦 Finans Panel")
-    st.info(f"Kullanıcı: Kurter\nYetki: {st.session_state.auth}") #
-    menu = st.radio("Menü", ["Dashboard", "İşlem Merkezi"])
-    adat_rate = st.number_input("Adat Faizi %", value=39.75) / 100
-    if st.button("Çıkış"):
-        st.session_state.auth = None
-        st.rerun()
-
-# -------------------------
-# DASHBOARD
-# -------------------------
 if menu == "Dashboard":
-    st.title("📊 Finansal Durum & Analiz")
+    st.title("📊 Finansal Durum")
     if df.empty:
-        st.warning("Görüntülenecek veri bulunamadı.")
+        st.warning("Veri yok")
     else:
-        # Metrikler
         total = df["Tutar_TL"].sum()
         today = pd.Timestamp(datetime.now().date())
         valid = df[df["Vade_Date"].notnull()].copy()
@@ -185,34 +183,24 @@ if menu == "Dashboard":
         c2.metric("Ortalama Vade", avg_date.strftime("%d.%m.%Y"))
         c3.metric("Adat Yükü", f"{adat_cost:,.2f} ₺")
 
-        # Görselleştirme
-        st.subheader("📈 Nakit Akış Zaman Çizelgesi")
-        flow = valid.groupby("Vade_Date")["Tutar_TL"].sum().reset_index().sort_values("Vade_Date")
-        fig = px.bar(flow, x="Vade_Date", y="Tutar_TL", title="Günlük Ödeme Yükü")
+        fig = px.bar(valid.groupby("Vade_Date")["Tutar_TL"].sum().reset_index(), x="Vade_Date", y="Tutar_TL", title="Ödeme Takvimi")
         st.plotly_chart(fig, use_container_width=True)
 
-        # AI Analiz
-        st.subheader("🧠 AI CFO Raporu")
-        if st.button("Finansal Analiz Oluştur"):
-            with st.spinner("AI verileri yorumluyor..."):
-                st.markdown(ai_cfo_analysis(df))
-
+        if st.button("AI Analiz Yap"):
+            with st.spinner("AI analiz ediyor..."):
+                st.write(ai_cfo_analysis(df))
+        
         st.dataframe(df.drop(columns=["Vade_Date", "kur", "Tutar_TL"]), use_container_width=True)
 
-# -------------------------
-# OPERATION CENTER
-# -------------------------
 else:
-    st.title("📄 AI Evrak Analiz Merkezi")
-    img_file = st.file_uploader("Fatura veya Çek Görseli Yükleyin", type=["png", "jpg", "jpeg"])
-    
-    if img_file and st.button("AI İle Veri Çıkart"):
-        with st.spinner("Görsel taranıyor..."):
-            image = Image.open(img_file).convert("RGB")
+    st.title("📄 AI Evrak Analizi")
+    img = st.file_uploader("Fatura / Çek yükle", type=["png", "jpg", "jpeg"])
+    if img and st.button("AI Analiz"):
+        with st.spinner("AI analiz ediyor..."):
+            image = Image.open(img).convert("RGB")
             result = analyze_invoice(image)
             if result:
-                st.success("Veriler başarıyla ayrıştırıldı!")
+                st.success(f"AI Veri Çıkardı ({MODEL_NAME})")
                 st.json(result)
-                # Buraya Sheets'e kaydetme formu eklenebilir
             else:
-                st.error("AI veriyi okuyamadı. Lütfen görselin net olduğundan emin olun.")
+                st.error("Veri çıkarılamadı")
