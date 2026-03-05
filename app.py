@@ -45,7 +45,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. VERİ VE KUR FONKSİYONLARI ---
+# --- 3. FONKSİYONLAR ---
 @st.cache_data(ttl=300)
 def get_fx_rates():
     try:
@@ -67,9 +67,7 @@ def load_data(url, connection):
 
 def analyze_invoice(image_file):
     model = genai.GenerativeModel('gemini-1.5-flash')
-    prompt = """Bu faturadaki bilgileri oku ve sadece şu JSON formatında yanıt ver:
-    {"firma_adi": "...", "tutar": 0.0, "vade": "YYYY-MM-DD", "borclu": "..."}
-    JSON dışında metin ekleme."""
+    prompt = "Bu faturayı oku ve sadece şu JSON formatında yanıt ver: {'firma_adi': '...', 'tutar': 0.0, 'vade': 'YYYY-MM-DD', 'borclu': '...'}"
     img = Image.open(image_file)
     response = model.generate_content([prompt, img])
     try:
@@ -158,18 +156,14 @@ if menu == "🏠 Dashboard":
         kritik = valid_v[(valid_v['fark'] <= 7) & (valid_v['fark'] >= 0)]
         if not kritik.empty:
             st.markdown(f"""
-                <div class="alert-bar">
-                    <span style="font-size: 20px;">🔥</span>
-                    <span>ACİL ÖDEME: {len(kritik)} Evrak Yaklaşıyor! (Toplam: {kritik['Tutar'].sum():,.2f} ₺)</span>
-                    <span style="font-size: 20px;">🔥</span>
-                </div>
+                <div class="alert-bar"><span>🔥 ACİL ÖDEME: 7 Gün İçinde {len(kritik)} Evrak! ({kritik['Tutar'].sum():,.2f} ₺) 🔥</span></div>
             """, unsafe_allow_html=True)
 
-    c_m, c_s = st.columns([3, 1])
-    with c_m:
+    col_main, col_side = st.columns([3, 1])
+    with col_main:
         st.subheader("📋 Takip Listesi")
         st.dataframe(filtered_df, use_container_width=True, hide_index=True)
-    with c_s:
+    with col_side:
         st.subheader("⏰ Kritikler")
         if not filtered_df.empty:
             safe_k = filtered_df[filtered_df['Vade_Date'].notnull()].copy()
@@ -179,23 +173,23 @@ if menu == "🏠 Dashboard":
             else: st.info("Vade yok.")
 
 # --- 8. VERİ YÖNETİMİ SAYFASI ---
-elif menu == "📝 Veri Yönetimi":
+else:
     st.title("📝 Veri Yönetimi")
     st.markdown("---")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.markdown('<div class="manage-card">📥 Taslak</div>', unsafe_allow_html=True)
-        t_csv = pd.DataFrame(columns=["Firma Adı","Evrak Tipi","Tutar","Vade"]).to_csv(index=False).encode('utf-8-sig')
-        st.download_button("İndir", t_csv, "Taslak.csv", use_container_width=True)
+        t_csv = pd.DataFrame(columns=["Firma Adı","Evrak Tipi","Banka","Tutar","Vade"]).to_csv(index=False).encode('utf-8-sig')
+        st.download_button("Excel İndir", t_csv, "Taslak.csv", use_container_width=True)
     with c2:
         st.markdown('<div class="manage-card">📸 Fatura Tara</div>', unsafe_allow_html=True)
         up_inv = st.file_uploader("Fatura", type=["jpg", "png", "jpeg"], label_visibility="collapsed")
         if up_inv and 'invoice_data' not in st.session_state:
-            with st.spinner("Okunuyor..."):
+            with st.spinner("Gemini okuyor..."):
                 d = analyze_invoice(up_inv)
                 if d: st.session_state.invoice_data = d
     with c3:
-        st.markdown('<div class="manage-card">🌐 E-Tablo</div>', unsafe_allow_html=True)
+        st.markdown('<div class="manage-card">🌐 Sheets</div>', unsafe_allow_html=True)
         st.link_button("Aç ↗", edit_url, use_container_width=True)
     with c4:
         st.markdown('<div class="manage-card">✍️ Manuel</div>', unsafe_allow_html=True)
@@ -212,5 +206,5 @@ elif menu == "📝 Veri Yönetimi":
                 vde = st.date_input("Vade")
             with f3: asil = st.text_input("Borçlu", value=inv.get('borclu', ""))
             if st.form_submit_button("Kaydet"):
-                st.success("Kaydedildi!")
+                st.success("Kayıt Alındı!")
                 if 'invoice_data' in st.session_state: del st.session_state.invoice_data
