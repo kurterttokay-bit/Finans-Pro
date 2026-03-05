@@ -95,75 +95,45 @@ if menu == "🏠 Dashboard":
     c2.metric("Ort. Vade", ort_vade.strftime("%d.%m.%Y"))
     c3.metric("Adat Yükü", f"{adat_yuku:,.2f} ₺")
     st.dataframe(df.drop(columns=['Vade_Date', 'Tutar_TL']), use_container_width=True, hide_index=True)
-# --- 6. VERİ YÖNETİMİ ---
+# --- 6. VERİ YÖNETİMİ (Geliştirilmiş) ---
 else:
     st.title("📝 İşlem Merkezi")
     
-    # --- AI ANALİZ ---
-    up_img = st.file_uploader("📸 Fatura/Çek Görseli (OCR Destekli)", type=["jpg","png","jpeg"])
+    up_img = st.file_uploader("📸 Fatura/Çek Görseli", type=["jpg","png","jpeg"])
     
     if up_img and st.button("AI İle Analiz Et"):
-        with st.spinner(f"{target_model} ile analiz ediliyor..."):
+        # 1.0 Pro görsel desteklemediği için en az 1.5 Flash kullanılmalı
+        actual_model = target_model if "1.5" in target_model else "gemini-1.5-flash"
+        with st.spinner(f"{actual_model} ile analiz ediliyor..."):
             try:
-                model = genai.GenerativeModel(target_model)
+                model = genai.GenerativeModel(actual_model)
                 img = Image.open(up_img).convert("RGB")
-                prompt = """Perform OCR on this document.
-                Respond STRICTLY with valid JSON only.
-                Format: {"firma": "str", "tutar": float, "vade": "DD.MM.YYYY", "banka": "str"}"""
+                prompt = "Perform OCR. Respond ONLY JSON: {'firma': 'str', 'tutar': float, 'vade': 'DD.MM.YYYY', 'banka': 'str'}"
                 resp = model.generate_content([prompt, img])
                 
+                # Yanıt yakalama (Senin eklediğin güvenli yöntem)
                 raw_text = getattr(resp, "text", None)
                 if not raw_text and hasattr(resp, "candidates"):
                     raw_text = resp.candidates[0].content.parts[0].text
                 
-                clean_json = raw_text.strip().replace('```json', '').replace('```', '')
-                try:
+                if raw_text:
+                    clean_json = raw_text.strip().replace('```json', '').replace('```', '')
                     st.session_state.temp_data = json.loads(clean_json)
-                    st.success("Veriler başarıyla ayrıştırıldı!")
+                    st.success("Veriler ayrıştırıldı!")
                     st.rerun()
-                except json.JSONDecodeError:
-                    st.warning("Model çıktı verdi ama JSON formatında değil. Ham metin aşağıda:")
-                    st.code(raw_text)
-                    st.session_state.temp_data = {}
             except Exception as e:
-                st.error(f"AI Analiz Hatası: {e}")
-    # --- MANUEL GİRİŞ ---
-    if 'temp_data' in st.session_state or st.toggle("Manuel Giriş"):
-        td = st.session_state.get('temp_data', {})
-        with st.form("onay_formu"):
-            col1, col2 = st.columns(2)
-            with col1:
-                v_f = st.text_input("Firma", value=td.get('firma', ''))
-                v_t = st.selectbox("Tür", ["Fatura", "Çek", "Senet"])
-                v_m = st.number_input("Tutar", value=float(td.get('tutar', 0.0)))
-            with col2:
-                v_b = st.text_input("Banka", value=td.get('banka', ''))
-                try:
-                    dv = datetime.strptime(td.get('vade', ''), '%d.%m.%Y')
-                except:
-                    dv = datetime.now()
-                v_v = st.date_input("Vade", value=dv)
-                v_d = st.selectbox("Döviz", ["TL", "USD", "EUR"])
+                st.error(f"AI Analiz Hatası: {e}. Lütfen Gemini 1.5 sürümünü kullandığınızdan emin olun.")
+
+    # Kayıt butonundaki concat işlemini garantiye alalım
+    if st.form_submit_button("✅ Google Sheets'e Kaydet"):
+        try:
+            # Mevcut DF boşsa kolonları manuel oluştur
+            yeni_row = pd.DataFrame([{"Firma Adı": v_f, "Evrak Tipi": v_t, "Banka": v_b, "Tutar": v_m, "Vade": v_v.strftime('%d.%m.%Y'), "Döviz": v_d}])
             
-            if st.form_submit_button("✅ Google Sheets'e Kaydet"):
-                try:
-                    yeni_row = pd.DataFrame([{
-                        "Firma Adı": v_f,
-                        "Evrak Tipi": v_t,
-                        "Banka": v_b,
-                        "Tutar": v_m,
-                        "Vade": v_v.strftime('%d.%m.%Y'),
-                        "Döviz": v_d
-                    }])
-                    # Google Sheets'e yazma
-                    conn.update(
-                        spreadsheet=edit_url,
-                        data=pd.concat([df, yeni_row], ignore_index=True)
-                    )
-                    st.cache_data.clear()
-                    if 'temp_data' in st.session_state:
-                        del st.session_state.temp_data
-                    st.success("Kayıt Başarılı!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Kayıt Hatası: {e}. GSheets API yetkilerini kontrol edin.")
+            # Eğer Sheets boş gelmişse df'i yeni_row ile başlat
+            updated_df = pd.concat([df, yeni_row], ignore_index=True) if not df.empty else yeni_row
+            
+            conn.update(spreadsheet=edit_url, data=updated_df)
+            st.cache_data.clear()
+            st.success("Kayıt Başarılı!")
+            st.rerun()
