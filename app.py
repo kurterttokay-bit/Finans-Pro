@@ -8,7 +8,7 @@ from PIL import Image
 import json
 
 # --- 1. AYARLAR VE GÜVENLİK ---
-st.set_page_config(page_title="Finans Pro Final", layout="wide", page_icon="🏦")
+st.set_page_config(page_title="Finans Pro Kurter Edition", layout="wide", page_icon="🏦")
 
 if 'auth' not in st.session_state: st.session_state.auth = None
 sifreler = {"patron125": "PATRON", "muhasebe007": "MUHASEBE", "kurter": "YONETICI"}
@@ -33,13 +33,10 @@ if api_key:
     genai.configure(api_key=api_key)
     try:
         models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        # Öncelik sırası: flash-latest > flash > pro
         if any("1.5-flash-latest" in m for m in models):
             target_model = next(m for m in models if "1.5-flash-latest" in m)
         elif any("1.5-flash" in m for m in models):
             target_model = next(m for m in models if "1.5-flash" in m)
-        elif any("1.5-pro" in m for m in models):
-            target_model = next(m for m in models if "1.5-pro" in m)
     except: pass
 
 # --- 3. VERİ VE DÖVİZ BAĞLANTISI ---
@@ -60,7 +57,6 @@ def load_data():
         df.columns = df.columns.str.strip()
         df['Tutar'] = pd.to_numeric(df['Tutar'], errors='coerce').fillna(0)
         df['Vade_Date'] = pd.to_datetime(df['Vade'], dayfirst=True, errors='coerce')
-        if 'Döviz' not in df.columns: df['Döviz'] = 'TL'
         return df
     except: return pd.DataFrame(columns=["Firma Adı", "Evrak Tipi", "Banka", "Tutar", "Vade", "Döviz"])
 
@@ -75,26 +71,24 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ---  navigation ---
 menu = st.sidebar.radio("Menü", ["🏠 Dashboard", "📝 Veri Yönetimi"])
 if st.sidebar.button("🔴 Güvenli Çıkış"):
     st.session_state.auth = None
     st.rerun()
 
-# --- 5. DASHBOARD (Metrikler Geri Geldi) ---
+# --- 5. DASHBOARD ---
 if menu == "🏠 Dashboard":
     st.title("⚖️ Finansal Durum Paneli")
     
     def to_tl(row):
-        if row['Döviz'] == 'USD': return row['Tutar'] * usd_kur
-        if row['Döviz'] == 'EUR': return row['Tutar'] * eur_kur
+        if row.get('Döviz') == 'USD': return row['Tutar'] * usd_kur
+        if row.get('Döviz') == 'EUR': return row['Tutar'] * eur_kur
         return row['Tutar']
 
     df['Tutar_TL'] = df.apply(to_tl, axis=1)
     total_tl = df['Tutar_TL'].sum()
     bugun = pd.Timestamp(datetime.now().date())
     
-    # Ortamala Vade ve Adat Hesabı
     valid_v = df[df['Vade_Date'].notnull()].copy()
     if not valid_v.empty:
         gun_farklari = (valid_v['Vade_Date'] - bugun).dt.days
@@ -105,18 +99,16 @@ if menu == "🏠 Dashboard":
     else:
         ort_vade, adat, ort_gun = bugun, 0, 0
 
-    # Üst Metrik Kutuları
     c1, c2, c3, c4 = st.columns(4)
     c1.markdown(f'<div class="metric-card" style="background:#1b4332;">💰 Toplam Borç<br><b>{total_tl:,.2f} ₺</b></div>', unsafe_allow_html=True)
     c2.markdown(f'<div class="metric-card" style="background:#003566;">⏳ Ort. Vade<br><b>{ort_vade.strftime("%d.%m.%Y")}</b></div>', unsafe_allow_html=True)
     c3.markdown(f'<div class="metric-card" style="background:#9d4c00;">⚠️ Adat Yükü<br><b>{adat:,.2f} ₺</b></div>', unsafe_allow_html=True)
-    c4.markdown(f'<div class="metric-card" style="background:#2D2D2D;">💵 Kur: {usd_kur:.2f}<br>💶 Kur: {eur_kur:.2f}</div>', unsafe_allow_html=True)
+    c4.markdown(f'<div class="metric-card" style="background:#2D2D2D;">💵 $: {usd_kur:.2f} | 💶 €: {eur_kur:.2f}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.subheader("📊 Güncel Evrak Listesi")
     st.dataframe(df.drop(columns=['Vade_Date', 'Tutar_TL']), use_container_width=True, hide_index=True)
 
-# --- 6. VERİ YÖNETİMİ (Walrus Kaldırıldı, Prompt Katılaştırıldı) ---
+# --- 6. VERİ YÖNETİMİ ---
 else:
     st.title("📝 İşlem Merkezi")
     
@@ -129,11 +121,11 @@ else:
     with k2:
         st.markdown('<div class="manage-box">📤 Excel Yükle</div>', unsafe_allow_html=True)
         up_file = st.file_uploader("Seç", type=["csv","xlsx"], label_visibility="collapsed")
-        if up_file is not None: # Walrus operator yerine standart kontrol
+        if up_file is not None:
             if st.button("Tabloya Aktar"):
                 new_data = pd.read_csv(up_file) if up_file.name.endswith('csv') else pd.read_excel(up_file)
                 conn.update(spreadsheet=edit_url, data=pd.concat([df, new_data], ignore_index=True))
-                st.cache_data.clear() # Kesin temizlik
+                st.cache_data.clear()
                 st.success("Veriler eklendi!")
                 st.rerun()
 
@@ -147,26 +139,37 @@ else:
 
     st.divider()
 
-    # AI VE ONAY MEKANİZMASI
+    # --- GELİŞTİRİLMİŞ AI ANALİZ ---
     st.subheader("📸 Belge Analizi")
     up_img = st.file_uploader("Fatura/Çek Görseli", type=["jpg","png","jpeg"])
     
     if up_img and st.button("AI İle Tara"):
-        with st.spinner("Belge çözümleniyor..."):
+        with st.spinner("Belge içeriği çözümleniyor..."):
             try:
                 model = genai.GenerativeModel(target_model)
                 img = Image.open(up_img).convert("RGB")
-                # KATI PROMPT
-                prompt = "Analyze this document. Respond STRICTLY with valid JSON. Do not include any text, markdown code blocks, or explanations outside the JSON. Format: {'firma': 'str', 'tutar': float, 'vade': 'DD.MM.YYYY', 'banka': 'str'}"
+                # Esnetilmiş ve Veri Odaklı Prompt
+                prompt = """Lütfen bu görseldeki finansal verileri (Firma Adı, Tutar, Vade Tarihi, Banka) bul. 
+                Bulduğun sonuçları MUTLAKA aşağıdaki JSON formatında döndür. 
+                Sadece JSON çıktısı ver, açıklama yapma.
+                Format: {"firma": "isim", "tutar": 0.0, "vade": "GG.AA.YYYY", "banka": "isim"}"""
+                
                 resp = model.generate_content([prompt, img])
                 
-                # Güvenli JSON Ayıklama
-                clean_json = resp.text.strip().replace('```json', '').replace('```', '')
+                # Akıllı JSON Temizleme
+                raw_text = resp.text.strip()
+                if "```json" in raw_text:
+                    clean_json = raw_text.split("```json")[1].split("```")[0].strip()
+                elif "```" in raw_text:
+                    clean_json = raw_text.split("```")[1].split("```")[0].strip()
+                else:
+                    clean_json = raw_text
+
                 try:
                     st.session_state.temp_data = json.loads(clean_json)
                     st.rerun()
                 except:
-                    st.error("AI veriyi okudu ama formatlayamadı. Lütfen formu doldurun.")
+                    st.warning("AI veriyi okudu ama formatlayamadı. Formu sizin için açtım.")
                     st.session_state.temp_data = {} # Fallback: Formu boş aç
             except Exception as e: st.error(f"Hata: {e}")
 
@@ -181,7 +184,7 @@ else:
                 v_tutar = st.number_input("Tutar", value=float(td.get('tutar', 0.0)))
                 try: dv = datetime.strptime(td.get('vade', ''), '%d.%m.%Y')
                 except: dv = datetime.now()
-                v_vade = st.date_input("Vade", value=dv) # Tarih inputu güvenliği
+                v_vade = st.date_input("Vade", value=dv)
             with f3:
                 v_banka = st.text_input("Banka", value=td.get('banka', ''))
                 v_doviz = st.selectbox("Döviz", ["TL", "USD", "EUR"])
@@ -194,5 +197,5 @@ else:
                 conn.update(spreadsheet=edit_url, data=pd.concat([df, yeni], ignore_index=True))
                 st.cache_data.clear()
                 if 'temp_data' in st.session_state: del st.session_state.temp_data
-                st.success("Kayıt tamamlandı!")
+                st.success("Kaydedildi!")
                 st.rerun()
