@@ -2,7 +2,10 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import google.generativeai as genai
-from st_gsheets_connection import GSheetsConnection
+try:
+    from streamlit_gsheets import GSheetsConnection
+except ImportError:
+    from st_gsheets_connection import GSheetsConnection
 from datetime import datetime, timedelta
 from PIL import Image
 import json
