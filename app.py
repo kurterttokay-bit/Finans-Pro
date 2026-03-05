@@ -11,7 +11,6 @@ from PIL import Image
 st.set_page_config(page_title="Finans Pro", layout="wide", page_icon="🏦")
 
 # --- GEMINI YAPILANDIRMASI ---
-# Gemini 1.5 Flash kullanarak faturayı dijital veriye dönüştürüyoruz.
 genai.configure(api_key="AIzaSyCgKGlkcNNmSdv8HKTm8j4RidpR7lMqYHM")
 
 # --- 2. ÖZEL CSS (TASARIM) ---
@@ -32,14 +31,10 @@ st.markdown("""
     background: linear-gradient(90deg, #4b0000, #990000); color: white; padding: 15px; border-radius: 12px;
     text-align: center; font-weight: bold; margin-bottom: 20px; border: 2px solid #ff4b2b; animation: border-glow 1.5s infinite;
 }
-.manage-card { 
-    background: #1E1E1E; border: 1px solid #333; padding: 20px; border-radius: 15px; 
-    text-align: center; color: white; min-height: 140px;
-}
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. FONKSİYONLAR ---
+# --- 3. YARDIMCI FONKSİYONLAR ---
 @st.cache_data(ttl=300)
 def get_fx_rates():
     try:
@@ -61,7 +56,7 @@ def load_data(url, connection):
 
 def analyze_invoice(image_file):
     model = genai.GenerativeModel('gemini-1.5-flash')
-    prompt = "Bu faturayı oku ve sadece şu JSON formatında cevap ver: {'firma_adi': '...', 'tutar': 0.0, 'vade': 'YYYY-MM-DD', 'borclu': '...'}"
+    prompt = "Bu faturayı oku ve sadece şu JSON formatında yanıt ver: {'firma_adi': '...', 'tutar': 0.0, 'vade': 'YYYY-MM-DD', 'borclu': '...'}"
     img = Image.open(image_file)
     response = model.generate_content([prompt, img])
     try:
@@ -75,7 +70,7 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 df = load_data(edit_url, conn)
 usd_kur, eur_kur = get_fx_rates()
 
-# --- 5. YETKİ (Şifreler Düzeldi) ---
+# --- 5. ŞİFRE KONTROLÜ (GÜNCEL) ---
 if 'auth' not in st.session_state: st.session_state.auth = None
 sifreler = {"deneme123": "DENEME", "patron125": "PATRON", "muhasebe007": "MUHASEBE"}
 
@@ -104,17 +99,14 @@ with st.sidebar:
 if menu == "🏠 Dashboard":
     st.title("⚖️ Finans Dashboard")
     bugun = pd.Timestamp(datetime.now().date())
-    
     if not df.empty:
         total_tl = df['Tutar'].sum()
         valid_v = df[df['Vade_Date'].notnull()].copy()
-        
         if not valid_v.empty:
             gun_fark = (valid_v['Vade_Date'] - bugun).dt.days
             ort_vade = bugun + timedelta(days=int((valid_v['Tutar'] * gun_fark).sum() / total_tl)) if total_tl > 0 else bugun
             adat = ((valid_v['Tutar'] * gun_fark).sum() * 0.3975) / 365
-        else:
-            ort_vade, adat = bugun, 0
+        else: ort_vade, adat = bugun, 0
 
         st.markdown(f"""
         <div class="metric-container">
@@ -124,47 +116,26 @@ if menu == "🏠 Dashboard":
             <div class="metric-card" style="background:#1C1C1E;"><div class="fx-row">USD: {usd_kur:.4f}</div><div class="fx-row">EUR: {eur_kur:.4f}</div></div>
         </div>
         """, unsafe_allow_html=True)
-
-        st.subheader("📋 Takip Listesi")
         st.dataframe(df, use_container_width=True, hide_index=True)
 
 # --- 8. VERİ YÖNETİMİ ---
 elif menu == "📝 Veri Yönetimi":
     st.title("📝 Veri Yönetimi")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.link_button("🌐 Google Sheets'i Aç", edit_url, use_container_width=True)
-    with c2:
-        show_form = st.toggle("Manuel Giriş Formu")
+    st.link_button("🌐 Google Sheets'i Aç", edit_url, use_container_width=True)
+    with st.form("manual"):
+        f1, f2, f3 = st.columns(3)
+        with f1: st.text_input("Firma")
+        with f2: st.number_input("Tutar", min_value=0.0)
+        with f3: st.date_input("Vade")
+        st.form_submit_button("Kaydet")
 
-    if show_form:
-        with st.form("manuel_entry"):
-            f1, f2, f3 = st.columns(3)
-            with f1: st.text_input("Firma Adı")
-            with f2: st.number_input("Tutar", min_value=0.0)
-            with f3: st.date_input("Vade")
-            st.form_submit_button("Kaydet")
-
-# --- 9. AI FATURA TARAMA (Buraya eklendi!) ---
+# --- 9. AI FATURA TARAMA ---
 else:
     st.title("📸 AI Fatura Tarama")
-    st.info("Fatura resmini yükleyin, Gemini verileri otomatik ayrıştırsın.")
-    
-    uploaded_file = st.file_uploader("Fatura Görseli Seç (JPG, PNG)", type=["jpg", "jpeg", "png"])
-    
-    if uploaded_file is not None:
-        st.image(uploaded_file, caption="Yüklenen Fatura", width=300)
-        if st.button("Faturayı Analiz Et"):
-            with st.spinner("AI verileri okuyor..."):
-                result = analyze_invoice(uploaded_file)
-                if result:
-                    st.success("Veriler başarıyla çekildi!")
-                    st.json(result)
-                    # Formu doldurma önerisi
-                    with st.expander("Onayla ve Kaydet"):
-                        st.text_input("Firma", value=result.get('firma_adi', ''))
-                        st.number_input("Tutar", value=float(result.get('tutar', 0.0)))
-                        st.text_input("Asıl Borçlu", value=result.get('borclu', ''))
-                        st.button("Sheets'e Gönder")
-                else:
-                    st.error("Fatura okunamadı, lütfen tekrar deneyin.")
+    up = st.file_uploader("Fatura Görseli", type=["jpg", "png"])
+    if up:
+        st.image(up, width=300)
+        if st.button("Analiz Et"):
+            res = analyze_invoice(up)
+            if res: st.write("### AI Sonucu:", res)
+            else: st.error("Okunamadı!")
