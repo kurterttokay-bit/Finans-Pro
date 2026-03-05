@@ -8,19 +8,14 @@ import json
 import re
 import logging
 import plotly.express as px
-
-# --- 1. KÜTÜPHANE BAĞLANTI KONTROLÜ (Görsel 4 hatası için) ---
-try:
-    from streamlit_gsheets import GSheetsConnection
-except ImportError:
-    try:
-        from st_gsheets_connection import GSheetsConnection
-    except ImportError:
-        st.error("Kütüphane yüklenemedi. Lütfen requirements.txt dosyasını kontrol edip Reboot yapın.")
+import pytesseract
+import os
+from pdf2image import convert_from_bytes
 
 # -------------------------
-# CONFIG
+# STREAMLIT CONFIG
 # -------------------------
+
 st.set_page_config(
     page_title="Finans Enterprise",
     page_icon="🏦",
@@ -32,6 +27,7 @@ logging.basicConfig(level=logging.INFO)
 # -------------------------
 # AUTH SYSTEM
 # -------------------------
+
 ROLES = {
     "patron125": "PATRON",
     "muhasebe007": "MUHASEBE",
@@ -42,176 +38,353 @@ if "auth" not in st.session_state:
     st.session_state.auth = None
 
 def login():
-    col1, col2, col3 = st.columns([1, 1.3, 1])
+
+    col1, col2, col3 = st.columns([1,1.3,1])
+
     with col2:
+
         st.title("🏦 Finans Sistemi")
+
         with st.form("login"):
+
             pwd = st.text_input("Şifre", type="password")
             submit = st.form_submit_button("Giriş")
+
             if submit:
+
                 if pwd in ROLES:
                     st.session_state.auth = ROLES[pwd]
                     st.rerun()
+
                 else:
                     st.error("Hatalı şifre")
 
 if not st.session_state.auth:
+
     login()
     st.stop()
 
 # -------------------------
-# API CONFIG (DİNAMİK MODEL KONTROLÜ - Görsel 1, 2, 3 hatası için)
+# GEMINI AI
 # -------------------------
+
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 genai.configure(api_key=GEMINI_API_KEY)
 
-@st.cache_resource
-def get_model():
-    try:
-        # Mevcut modelleri listele
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        if "models/gemini-1.5-flash" in available_models:
-            return "models/gemini-1.5-flash"
-        elif "gemini-1.5-flash" in available_models:
-            return "gemini-1.5-flash"
-        elif "models/gemini-pro" in available_models:
-            return "models/gemini-pro"
-        return "gemini-1.5-flash" # Varsayılan
-    except:
-        return "gemini-1.5-flash"
-
-MODEL_NAME = get_model()
-model = genai.GenerativeModel(MODEL_NAME)
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 # -------------------------
 # GOOGLE SHEETS
 # -------------------------
+
+from streamlit_gsheets import GSheetsConnection
+
 SHEET_ID = "1gow0J5IA0GaB-BjViSKGbIxoZije0klFGgvDWYHdcNA"
+
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 # -------------------------
-# FX RATES
+# FX
 # -------------------------
+
 @st.cache_data(ttl=300)
+
 def get_fx():
-    try:
-        usd = float(yf.download("USDTRY=X", period="1d", progress=False)["Close"].iloc[-1])
-        eur = float(yf.download("EURTRY=X", period="1d", progress=False)["Close"].iloc[-1])
-        return usd, eur
-    except Exception as e:
-        logging.error(e)
-        return 34.90, 37.80
+
+    usd = float(yf.download("USDTRY=X", period="1d")["Close"].iloc[-1])
+    eur = float(yf.download("EURTRY=X", period="1d")["Close"].iloc[-1])
+
+    return usd, eur
 
 # -------------------------
 # DATA LOAD
 # -------------------------
+
 @st.cache_data(ttl=120)
+
 def load_data():
-    try:
-        df = conn.read(spreadsheet=SHEET_ID)
-        if df.empty: return df
-        df.columns = df.columns.str.strip()
-        df["Tutar"] = pd.to_numeric(df["Tutar"], errors="coerce").fillna(0)
-        if "Vade" in df.columns:
-            df["Vade_Date"] = pd.to_datetime(df["Vade"], dayfirst=True, errors="coerce")
-        else:
-            df["Vade_Date"] = None
+
+    df = conn.read(spreadsheet=SHEET_ID)
+
+    if df.empty:
         return df
-    except Exception as e:
-        logging.error(e)
-        return pd.DataFrame()
+
+    df["Tutar"] = pd.to_numeric(df["Tutar"], errors="coerce").fillna(0)
+
+    if "Vade" in df.columns:
+        df["Vade_Date"] = pd.to_datetime(df["Vade"], dayfirst=True)
+
+    return df
 
 # -------------------------
-# AI ANALYSIS
+# OCR
 # -------------------------
+
+def ocr_read(image):
+
+    text = pytesseract.image_to_string(image)
+
+    return text
+
+# -------------------------
+# AI PARSE
+# -------------------------
+
 def analyze_invoice(image):
-    prompt = """Extract invoice information. Return ONLY JSON. {"firma": "", "tutar": number, "vade": "DD.MM.YYYY", "banka": ""}"""
-    try:
-        response = model.generate_content([prompt, image])
-        try:
-            text = response.text
-        except:
-            text = response.candidates[0].content.parts[0].text
-        json_match = re.search(r"\{.*\}", text, re.S)
-        if json_match:
-            return json.loads(json_match.group())
-    except Exception as e:
-        st.error(f"AI Analiz Hatası ({MODEL_NAME}): {e}")
+
+    prompt = """
+Extract invoice data.
+
+Return JSON:
+
+{
+"firma":"",
+"urun":"",
+"tutar":number,
+"kdv":number,
+"tarih":"DD.MM.YYYY"
+}
+"""
+
+    response = model.generate_content([prompt,image])
+
+    text = response.text
+
+    json_match = re.search(r"\{.*\}", text, re.S)
+
+    if json_match:
+
+        return json.loads(json_match.group())
+
     return None
 
-def ai_cfo_analysis(df):
+# -------------------------
+# SAVE INVOICE
+# -------------------------
+
+def save_invoice(image):
+
+    if not os.path.exists("invoices"):
+        os.mkdir("invoices")
+
+    path = f"invoices/{datetime.now().timestamp()}.png"
+
+    image.save(path)
+
+    return path
+
+# -------------------------
+# GOOGLE SHEETS WRITE
+# -------------------------
+
+def add_to_sheet(df, result):
+
+    new = pd.DataFrame([{
+
+        "Firma": result["firma"],
+        "Urun": result["urun"],
+        "Tutar": result["tutar"],
+        "KDV": result["kdv"],
+        "Tarih": result["tarih"]
+
+    }])
+
+    df = pd.concat([df,new])
+
+    conn.update(spreadsheet=SHEET_ID,data=df)
+
+# -------------------------
+# AI CFO
+# -------------------------
+
+def ai_cfo(df):
+
     sample = df.head(50).to_dict()
-    prompt = f"Sen bir CFO AI'sısın. Şu borç tablosunu analiz et: {sample}. Nakit akışı ve ödeme risklerini kısa ve öz Türkçe açıkla."
-    try:
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"CFO Analiz Hatası ({MODEL_NAME}): {e}"
+
+    prompt = f"""
+
+Sen deneyimli bir CFO'sun.
+
+Şirketin borç tablosu:
+
+{sample}
+
+Analiz et:
+
+1 riskli ödemeler
+2 nakit akışı
+3 öneri
+"""
+
+    response = model.generate_content(prompt)
+
+    return response.text
 
 # -------------------------
 # SIDEBAR
 # -------------------------
+
 with st.sidebar:
+
     st.title("🏦 Finans Panel")
+
     st.info(f"Kullanıcı: Kurter\nYetki: {st.session_state.auth}")
-    menu = st.radio("Menü", ["Dashboard", "İşlem Merkezi"])
-    adat_rate = st.number_input("Adat Faizi %", value=39.75) / 100
-    if st.button("🔴 Çıkış"):
-        st.session_state.auth = None
+
+    menu = st.radio("Menü",
+
+    [
+    "Dashboard",
+    "AI Evrak Analizi",
+    "AI CFO Chat"
+    ])
+
+    adat_rate = st.number_input("Adat Faizi %",value=39.75)/100
+
+    if st.button("Çıkış"):
+        st.session_state.auth=None
         st.rerun()
 
 # -------------------------
-# DATA PREP & MAIN
+# MAIN DATA
 # -------------------------
+
 df = load_data()
+
 usd, eur = get_fx()
 
 if not df.empty:
-    kur_map = {"USD": usd, "EUR": eur}
-    df["kur"] = df["Döviz"].map(kur_map).fillna(1)
-    df["Tutar_TL"] = df["Tutar"] * df["kur"]
 
-if menu == "Dashboard":
-    st.title("📊 Finansal Durum")
+    kur_map = {
+
+        "USD": usd,
+        "EUR": eur
+
+    }
+
+    df["kur"]=df["Döviz"].map(kur_map).fillna(1)
+
+    df["Tutar_TL"]=df["Tutar"]*df["kur"]
+
+# -------------------------
+# DASHBOARD
+# -------------------------
+
+if menu=="Dashboard":
+
+    st.title("📊 Finans Dashboard")
+
     if df.empty:
+
         st.warning("Veri yok")
+
     else:
-        total = df["Tutar_TL"].sum()
-        today = pd.Timestamp(datetime.now().date())
-        valid = df[df["Vade_Date"].notnull()].copy()
-        
-        if not valid.empty:
-            days = (valid["Vade_Date"] - today).dt.days
-            weighted = (valid["Tutar_TL"] * days).sum()
-            avg_days = weighted / valid["Tutar_TL"].sum() if total > 0 else 0
-            avg_date = today + timedelta(days=int(avg_days))
-            adat_cost = (weighted * adat_rate) / 365
+
+        total=df["Tutar_TL"].sum()
+
+        today=pd.Timestamp(datetime.now().date())
+
+        valid=df[df["Vade_Date"].notnull()]
+
+        days=(valid["Vade_Date"]-today).dt.days
+
+        overdue=valid[days<0]["Tutar_TL"].sum()
+
+        due7=valid[(days>=0)&(days<=7)]["Tutar_TL"].sum()
+
+        due30=valid[(days>7)&(days<=30)]["Tutar_TL"].sum()
+
+        c1,c2,c3,c4=st.columns(4)
+
+        c1.metric("Toplam Borç",f"{total:,.2f} ₺")
+
+        c2.metric("Geciken",f"{overdue:,.2f} ₺")
+
+        c3.metric("7 Gün",f"{due7:,.2f} ₺")
+
+        c4.metric("30 Gün",f"{due30:,.2f} ₺")
+
+        fig=px.bar(valid.groupby("Vade_Date")["Tutar_TL"].sum().reset_index(),x="Vade_Date",y="Tutar_TL")
+
+        st.plotly_chart(fig,use_container_width=True)
+
+        if st.button("AI CFO Analizi"):
+
+            st.markdown(ai_cfo(df))
+
+        st.dataframe(df)
+
+# -------------------------
+# INVOICE ANALYSIS
+# -------------------------
+
+elif menu=="AI Evrak Analizi":
+
+    st.title("📄 Fatura Analizi")
+
+    file=st.file_uploader("Fatura yükle",type=["png","jpg","jpeg","pdf"])
+
+    if file:
+
+        if file.type=="application/pdf":
+
+            pages=convert_from_bytes(file.read())
+
+            image=pages[0]
+
         else:
-            avg_date, adat_cost = today, 0
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Toplam Borç", f"{total:,.2f} ₺")
-        c2.metric("Ortalama Vade", avg_date.strftime("%d.%m.%Y"))
-        c3.metric("Adat Yükü", f"{adat_cost:,.2f} ₺")
+            image=Image.open(file)
 
-        fig = px.bar(valid.groupby("Vade_Date")["Tutar_TL"].sum().reset_index(), x="Vade_Date", y="Tutar_TL", title="Ödeme Takvimi")
-        st.plotly_chart(fig, use_container_width=True)
+        st.image(image,width=400)
 
-        if st.button("🧠 AI CFO Analizi Yap"):
-            with st.spinner("AI analiz ediyor..."):
-                st.markdown(ai_cfo_analysis(df))
-        
-        st.dataframe(df.drop(columns=["Vade_Date", "kur", "Tutar_TL"]), use_container_width=True)
+        if st.button("AI Analiz"):
 
-else:
-    st.title("📄 AI Evrak Analizi")
-    img = st.file_uploader("Fatura / Çek yükle", type=["png", "jpg", "jpeg"])
-    if img and st.button("AI Analiz"):
-        with st.spinner("AI analiz ediyor..."):
-            image = Image.open(img).convert("RGB")
-            result = analyze_invoice(image)
-            if result:
-                st.success(f"AI Veri Çıkardı ({MODEL_NAME})")
-                st.json(result)
-            else:
-                st.error("Veri çıkarılamadı. Lütfen görseli kontrol edin.")
+            with st.spinner("AI analiz ediyor"):
+
+                result=analyze_invoice(image)
+
+                if result:
+
+                    st.json(result)
+
+                    if st.button("Excel'e Kaydet"):
+
+                        add_to_sheet(df,result)
+
+                        save_invoice(image)
+
+                        st.success("Kaydedildi")
+
+                else:
+
+                    st.error("Veri çıkarılamadı")
+
+# -------------------------
+# AI CFO CHAT
+# -------------------------
+
+elif menu=="AI CFO Chat":
+
+    st.title("🧠 AI CFO")
+
+    question=st.text_input("Soru sor")
+
+    if question:
+
+        prompt=f"""
+
+Bir CFO gibi cevap ver.
+
+Soru:
+
+{question}
+
+Veri:
+
+{df.head(50).to_dict()}
+
+"""
+
+        response=model.generate_content(prompt)
+
+        st.markdown(response.text)
