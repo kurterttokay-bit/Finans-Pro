@@ -240,27 +240,23 @@ def enhance_for_reading(img: Image.Image) -> Image.Image:
     g = g.filter(ImageFilter.MedianFilter(size=3))
     return g.convert("RGB")
 
-def decode_qr(img: Image.Image) -> list[str]:
-    # QR decode için pyzbar + opencv
+def decode_qr_opencv(img: Image.Image) -> list[str]:
     try:
         import cv2
         import numpy as np
-        from pyzbar.pyzbar import decode as zdecode
 
         arr = np.array(img.convert("RGB"))
         bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
-        # bazen küçük QR için büyütme işe yarar
+        # küçük QR için büyütme
         bgr = cv2.resize(bgr, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
 
-        codes = zdecode(bgr)
-        out = []
-        for c in codes:
-            try:
-                out.append(c.data.decode("utf-8", errors="ignore"))
-            except Exception:
-                pass
-        return out
+        detector = cv2.QRCodeDetector()
+        data, points, _ = detector.detectAndDecode(bgr)
+
+        if data and data.strip():
+            return [data.strip()]
+        return []
     except Exception:
         return []
 def ocr_read(image: Image.Image) -> str:
