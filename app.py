@@ -13,17 +13,17 @@ st.set_page_config(page_title="Yapdoksan Finans Pro", layout="wide", page_icon="
 # --- GEMINI YAPILANDIRMASI ---
 genai.configure(api_key="AIzaSyCgKGlkcNNmSdv8HKTm8j4RidpR7lMqYHM")
 
-# --- 2. ÖZEL CSS (Görselliği Geri Getirdik) ---
+# --- 2. ÖZEL CSS (Görselliği Koruyoruz) ---
 st.markdown("""
 <style>
 .metric-container { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 20px; }
-.metric-card { padding: 15px; border-radius: 12px; text-align: center; color: white; box-shadow: 2px 2px 10px rgba(0,0,0,0.3); border: 1px solid #333; }
-.metric-card .title { font-size: 14px; opacity: 0.8; margin-bottom: 5px; }
-.metric-card .value { font-size: 20px; font-weight: bold; }
+.metric-card { padding: 20px; border-radius: 15px; text-align: center; color: white; box-shadow: 0 4px 15px rgba(0,0,0,0.3); border: 1px solid #333; }
+.metric-card .title { font-size: 14px; opacity: 0.8; font-weight: 400; }
+.metric-card .value { font-size: 22px; font-weight: bold; margin-top: 5px; }
 @keyframes border-glow {
-    0% { box-shadow: 0 0 5px #ff4b2b; }
-    50% { box-shadow: 0 0 20px #ff416c; }
-    100% { box-shadow: 0 0 5px #ff4b2b; }
+    0% { box-shadow: 0 0 5px #ff4b2b; border-color: #ff4b2b; }
+    50% { box-shadow: 0 0 20px #ff416c; border-color: #ff416c; }
+    100% { box-shadow: 0 0 5px #ff4b2b; border-color: #ff4b2b; }
 }
 .alert-bar {
     background: linear-gradient(90deg, #4b0000, #990000); color: white; padding: 15px; border-radius: 12px;
@@ -39,7 +39,7 @@ def get_fx_rates():
         usd = float(yf.download("USDTRY=X", period="1d", interval="1m", progress=False)['Close'].iloc[-1])
         eur = float(yf.download("EURTRY=X", period="1d", interval="1m", progress=False)['Close'].iloc[-1])
         return usd, eur
-    except: return 34.50, 37.20
+    except: return 34.50, 37.25
 
 def load_data(url, connection):
     try:
@@ -54,10 +54,10 @@ def load_data(url, connection):
 
 def analyze_invoice(image_file):
     try:
-        # Hata veren yer: Model ismini tam yol olarak veriyoruz
-        model = genai.GenerativeModel('models/gemini-1.5-flash') 
+        # Hata veren yer: Modeli tam sürüm adıyla çağırıyoruz
+        model = genai.GenerativeModel('gemini-1.5-flash-latest') 
         img = Image.open(image_file)
-        prompt = "Faturadaki firma adı, toplam tutar (rakam), vade (YYYY-MM-DD) ve borçlu bilgilerini ayıkla. Sadece JSON formatında cevap ver."
+        prompt = "Bu bir fatura/çek görselidir. Firma adı, toplam tutar, vade (YYYY-MM-DD) ve borçlu bilgilerini bul. Sadece JSON formatında cevap ver."
         response = model.generate_content([prompt, img])
         clean_json = response.text.replace('```json', '').replace('```', '').strip()
         return json.loads(clean_json)
@@ -72,32 +72,32 @@ df = load_data(edit_url, conn)
 usd_kur, eur_kur = get_fx_rates()
 
 if 'auth' not in st.session_state: st.session_state.auth = None
-sifreler = {"deneme123": "DENEME", "patron125": "PATRON"}
+sifreler = {"deneme123": "DENEME", "patron125": "PATRON", "muhasebe007": "MUHASEBE"}
 
 if not st.session_state.auth:
     _, center, _ = st.columns([1, 1.2, 1])
     with center:
         with st.form("login"):
             pwd = st.text_input("Giriş Şifresi", type="password")
-            if st.form_submit_button("Erişimi Aç"):
+            if st.form_submit_button("Sisteme Giriş"):
                 if pwd in sifreler:
                     st.session_state.auth = sifreler[pwd]
                     st.rerun()
-                else: st.error("Hatalı!")
+                else: st.error("Hatalı Şifre!")
     st.stop()
 
 # --- 5. SIDEBAR ---
 with st.sidebar:
     st.title("🏦 Finans Pro")
-    st.write(f"Hoş geldin, **Kurter**")
-    menu = st.radio("Navigasyon", ["🏠 Dashboard", "📝 Veri Yönetimi", "📸 AI Fatura Tarama"])
+    st.write(f"Kullanıcı: **{st.session_state.auth}**")
+    menu = st.radio("Menü", ["🏠 Dashboard", "📝 Veri Yönetimi", "📸 AI Fatura Tarama"])
     if st.button("🔴 Güvenli Çıkış"):
         st.session_state.auth = None
         st.rerun()
 
-# --- 6. DASHBOARD (Görsel Tam Takım) ---
+# --- 6. DASHBOARD ---
 if menu == "🏠 Dashboard":
-    st.title("⚖️ Finansal Durum Paneli")
+    st.title("⚖️ Finansal Durum")
     bugun = pd.Timestamp(datetime.now().date())
     
     if not df.empty:
@@ -111,40 +111,45 @@ if menu == "🏠 Dashboard":
 
         st.markdown(f"""
         <div class="metric-container">
-            <div class="metric-card" style="background:#1b4332;"><div class="title">Toplam Yük</div><div class="value">{total_tl:,.2f} ₺</div></div>
+            <div class="metric-card" style="background:#004b23;"><div class="title">Toplam Yük</div><div class="value">{total_tl:,.2f} ₺</div></div>
             <div class="metric-card" style="background:#003566;"><div class="title">Ort. Vade</div><div class="value">{ort_vade.strftime('%d.%m.%Y')}</div></div>
-            <div class="metric-card" style="background:#8a5a00;"><div class="title">Adat (Faiz)</div><div class="value">{adat:,.2f} ₺</div></div>
-            <div class="metric-card" style="background:#1a1a1a;"><div class="title">USD / EUR</div><div class="value">{usd_kur:.2f} / {eur_kur:.2f}</div></div>
+            <div class="metric-card" style="background:#9d4c00;"><div class="title">Adat (Faiz)</div><div class="value">{adat:,.2f} ₺</div></div>
+            <div class="metric-card" style="background:#1a1a1a;"><div class="title">Döviz Kurları</div><div class="value">$/₺: {usd_kur:.2f} | €/₺: {eur_kur:.2f}</div></div>
         </div>
         """, unsafe_allow_html=True)
 
+        # Yanıp sönen kritik uyarı barı
         kritik = valid_v[(valid_v['Vade_Date'] - bugun).dt.days <= 7]
         if not kritik.empty:
-            st.markdown(f'<div class="alert-bar">🔥 DİKKAT: 7 GÜN İÇİNDE {len(kritik)} ÖDEME VAR!</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="alert-bar">⚠ DİKKAT: 7 GÜN İÇİNDE {len(kritik)} ADET ÖDEME VAR!</div>', unsafe_allow_html=True)
 
-        st.subheader("📋 Mevcut Evraklar")
+        st.subheader("📋 Evrak Takip Listesi")
         st.dataframe(df, use_container_width=True, hide_index=True)
 
 # --- 7. VERİ YÖNETİMİ ---
 elif menu == "📝 Veri Yönetimi":
-    st.title("📝 Evrak Yönetimi")
-    st.link_button("🌐 Google Sheets'i Aç", edit_url, use_container_width=True)
-    with st.form("manuel"):
-        c1, c2, c3 = st.columns(3)
-        with c1: st.text_input("Firma Adı")
-        with c2: st.number_input("Tutar", min_value=0.0)
-        with c3: st.date_input("Vade")
-        st.form_submit_button("Sisteme İşle")
+    st.title("📝 Veri & Evrak Girişi")
+    st.link_button("🌐 Google Sheets Üzerinden Düzenle", edit_url, use_container_width=True)
+    
+    with st.expander("➕ Manuel Kayıt Formu", expanded=True):
+        with st.form("manuel_giris"):
+            c1, c2, c3 = st.columns(3)
+            with c1: st.text_input("Firma Adı")
+            with c2: st.number_input("Tutar", min_value=0.0)
+            with c3: st.date_input("Vade Tarihi")
+            st.form_submit_button("Sisteme Kaydet")
 
 # --- 8. AI FATURA TARAMA ---
 else:
     st.title("📸 AI Fatura Tarama")
-    uploaded_file = st.file_uploader("Faturayı yükle (Resim)", type=["jpg", "jpeg", "png"])
-    if uploaded_file:
-        st.image(uploaded_file, width=400)
-        if st.button("🔍 Verileri Ayıkla"):
-            with st.spinner("AI analiz ediyor..."):
-                veri = analyze_invoice(uploaded_file)
-                if veri:
-                    st.success("Veriler yakalandı!")
-                    st.json(veri)
+    st.info("Faturayı veya çeki yükleyin, verileri Gemini otomatik çıkarsın.")
+    up = st.file_uploader("Dosya Seç", type=["jpg", "jpeg", "png"])
+    if up:
+        st.image(up, width=450, caption="Yüklenen Evrak")
+        if st.button("🔍 Verileri Analiz Et"):
+            with st.spinner("AI faturayı okuyor..."):
+                res = analyze_invoice(up)
+                if res:
+                    st.success("Analiz tamamlandı!")
+                    st.json(res)
+                    # Buraya gelen verileri form şeklinde gösterip onay alabilirsin
