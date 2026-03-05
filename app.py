@@ -2,16 +2,21 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import google.generativeai as genai
-try:
-    from streamlit_gsheets import GSheetsConnection
-except ImportError:
-    from st_gsheets_connection import GSheetsConnection
 from datetime import datetime, timedelta
 from PIL import Image
 import json
 import re
 import logging
 import plotly.express as px
+
+# --- 1. KÜTÜPHANE BAĞLANTI KONTROLÜ (Görsel 4 hatası için) ---
+try:
+    from streamlit_gsheets import GSheetsConnection
+except ImportError:
+    try:
+        from st_gsheets_connection import GSheetsConnection
+    except ImportError:
+        st.error("Kütüphane yüklenemedi. Lütfen requirements.txt dosyasını kontrol edip Reboot yapın.")
 
 # -------------------------
 # CONFIG
@@ -55,24 +60,27 @@ if not st.session_state.auth:
     st.stop()
 
 # -------------------------
-# API CONFIG (DİNAMİK MODEL KONTROLÜ EKLENDİ)
+# API CONFIG (DİNAMİK MODEL KONTROLÜ - Görsel 1, 2, 3 hatası için)
 # -------------------------
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 genai.configure(api_key=GEMINI_API_KEY)
 
-# Hangi modelin çalıştığını otomatik bulan güvenli blok
-try:
-    available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-    if "models/gemini-1.5-flash" in available_models:
-        MODEL_NAME = "models/gemini-1.5-flash"
-    elif "gemini-1.5-flash" in available_models:
-        MODEL_NAME = "gemini-1.5-flash"
-    else:
-        MODEL_NAME = "gemini-pro" 
-except Exception as e:
-    MODEL_NAME = "gemini-1.5-flash"
-    logging.error(f"Model listeleme hatası: {e}")
+@st.cache_resource
+def get_model():
+    try:
+        # Mevcut modelleri listele
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        if "models/gemini-1.5-flash" in available_models:
+            return "models/gemini-1.5-flash"
+        elif "gemini-1.5-flash" in available_models:
+            return "gemini-1.5-flash"
+        elif "models/gemini-pro" in available_models:
+            return "models/gemini-pro"
+        return "gemini-1.5-flash" # Varsayılan
+    except:
+        return "gemini-1.5-flash"
 
+MODEL_NAME = get_model()
 model = genai.GenerativeModel(MODEL_NAME)
 
 # -------------------------
@@ -92,7 +100,7 @@ def get_fx():
         return usd, eur
     except Exception as e:
         logging.error(e)
-        return 34.0, 37.0
+        return 34.90, 37.80
 
 # -------------------------
 # DATA LOAD
@@ -133,7 +141,7 @@ def analyze_invoice(image):
 
 def ai_cfo_analysis(df):
     sample = df.head(50).to_dict()
-    prompt = f"Sen bir CFO AI'sısın. Şu borç tablosunu analiz et: {sample}. Nakit akışı ve ödeme risklerini kısa ve öz açıkla."
+    prompt = f"Sen bir CFO AI'sısın. Şu borç tablosunu analiz et: {sample}. Nakit akışı ve ödeme risklerini kısa ve öz Türkçe açıkla."
     try:
         response = model.generate_content(prompt)
         return response.text
@@ -145,15 +153,15 @@ def ai_cfo_analysis(df):
 # -------------------------
 with st.sidebar:
     st.title("🏦 Finans Panel")
-    st.info(f"Yetki: {st.session_state.auth}")
+    st.info(f"Kullanıcı: Kurter\nYetki: {st.session_state.auth}")
     menu = st.radio("Menü", ["Dashboard", "İşlem Merkezi"])
     adat_rate = st.number_input("Adat Faizi %", value=39.75) / 100
-    if st.button("Çıkış"):
+    if st.button("🔴 Çıkış"):
         st.session_state.auth = None
         st.rerun()
 
 # -------------------------
-# DATA PREP & DASHBOARD & OPERATION
+# DATA PREP & MAIN
 # -------------------------
 df = load_data()
 usd, eur = get_fx()
@@ -189,9 +197,9 @@ if menu == "Dashboard":
         fig = px.bar(valid.groupby("Vade_Date")["Tutar_TL"].sum().reset_index(), x="Vade_Date", y="Tutar_TL", title="Ödeme Takvimi")
         st.plotly_chart(fig, use_container_width=True)
 
-        if st.button("AI Analiz Yap"):
+        if st.button("🧠 AI CFO Analizi Yap"):
             with st.spinner("AI analiz ediyor..."):
-                st.write(ai_cfo_analysis(df))
+                st.markdown(ai_cfo_analysis(df))
         
         st.dataframe(df.drop(columns=["Vade_Date", "kur", "Tutar_TL"]), use_container_width=True)
 
@@ -206,4 +214,4 @@ else:
                 st.success(f"AI Veri Çıkardı ({MODEL_NAME})")
                 st.json(result)
             else:
-                st.error("Veri çıkarılamadı")
+                st.error("Veri çıkarılamadı. Lütfen görseli kontrol edin.")
