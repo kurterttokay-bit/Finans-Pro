@@ -11,7 +11,7 @@ import json
 st.set_page_config(page_title="Finans Pro Enterprise", layout="wide", page_icon="🏦")
 
 if 'auth' not in st.session_state: st.session_state.auth = None
-# Roller ve Şifreler
+# Kullanıcı rolleri ve şifreleri
 sifreler = {
     "patron125": "PATRON", 
     "muhasebe007": "MUHASEBE", 
@@ -31,19 +31,20 @@ if not st.session_state.auth:
                 else: st.error("Hatalı!")
     st.stop()
 
-# --- 2. DİNAMİK MODEL VE PARAMETRELER ---
+# --- 2. DİNAMİK MODEL SEÇİMİ ---
 api_key = st.secrets.get("GEMINI_API_KEY")
-target_model = "models/gemini-1.5-pro"
+target_model = "models/gemini-1.5-pro" #
 if api_key:
     genai.configure(api_key=api_key)
     try:
         models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         target_model = next((m for m in models if "1.5-flash-latest" in m), 
-                           next((m for m in models if "1.5-flash" in m), models[0]))
+                           next((m for m in models if "1.5-flash" in m), "models/gemini-1.5-pro"))
     except: pass
 
-# --- 3. VERİ VE DÖVİZ ---
+# --- 3. VERİ BAĞLANTISI (GELİŞMİŞ YAZMA MODU) ---
 edit_url = "https://docs.google.com/spreadsheets/d/1gow0J5IA0GaB-BjViSKGbIxoZije0klFGgvDWYHdcNA/edit#gid=0"
+# Service account üzerinden tam yetkili bağlantı kuruyoruz
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 @st.cache_data(ttl=300)
@@ -56,6 +57,7 @@ def get_fx_rates():
 
 def load_data():
     try:
+        # ttl=0 ile her seferinde en güncel veriyi çekiyoruz
         df = conn.read(spreadsheet=edit_url, ttl=0)
         df.columns = df.columns.str.strip()
         df['Tutar'] = pd.to_numeric(df['Tutar'], errors='coerce').fillna(0)
@@ -66,20 +68,20 @@ def load_data():
 df = load_data()
 usd_kur, eur_kur = get_fx_rates()
 
-# --- 4. SIDEBAR & ROL YÖNETİMİ ---
+# --- 4. SIDEBAR & PARAMETRELER ---
 with st.sidebar:
     st.title(f"🏦 Finans Pro")
-    st.success(f"Rol: {st.session_state.auth}")
+    st.success(f"Hoş geldin: {st.session_state.auth}")
     
-    # ROL KISITLAMASI: Muhasebe Dashboard görmesin, Patron sadece Dashboard görsün
+    # Rol Bazlı Menü Kısıtlaması
     available_menus = ["🏠 Dashboard", "📝 Veri Yönetimi"]
     if st.session_state.auth == "MUHASEBE": available_menus = ["📝 Veri Yönetimi"]
     if st.session_state.auth == "PATRON": available_menus = ["🏠 Dashboard"]
     
     menu = st.radio("Menü", available_menus)
-    
     st.divider()
-    # Dinamik Adat Oranı Girişi
+    
+    # Dinamik Adat Girişi
     adat_orani = st.number_input("Yıllık Adat Oranı (%)", value=39.75, step=0.25) / 100
     
     if st.button("🔴 Çıkış"):
@@ -99,7 +101,7 @@ if menu == "🏠 Dashboard":
         gun_farklari = (valid_v['Vade_Date'] - bugun).dt.days
         temp_agirlik = (valid_v['Tutar_TL'] * gun_farklari).sum()
         ort_vade = bugun + timedelta(days=int(round(temp_agirlik / total_tl))) if total_tl > 0 else bugun
-        # Kullanıcıdan gelen dinamik oranla hesaplama
+        # Dinamik adat hesabı
         adat_yuku = (temp_agirlik * adat_orani) / 365
     else:
         ort_vade, adat_yuku = bugun, 0
@@ -107,7 +109,7 @@ if menu == "🏠 Dashboard":
     c1, c2, c3 = st.columns(3)
     c1.metric("Toplam Borç", f"{total_tl:,.2f} ₺")
     c2.metric("Ort. Vade", ort_vade.strftime("%d.%m.%Y"))
-    c3.metric("Adat Yükü", f"{adat_yuku:,.2f} ₺", help=f"Giriş Yapılan Oran: %{adat_orani*100:.2f}")
+    c3.metric("Adat Yükü", f"{adat_yuku:,.2f} ₺")
 
     st.divider()
     st.dataframe(df.drop(columns=['Vade_Date', 'Tutar_TL']), use_container_width=True, hide_index=True)
@@ -117,20 +119,17 @@ else:
     st.title("📝 Veri İşlem Merkezi")
     
     k1, k2, k3 = st.columns(3)
-    with k1: # GÜVENLİ EXCEL YÜKLEME
+    with k1: # Güvenli Excel/CSV Yükleme
         up_file = st.file_uploader("Dosya Yükle", type=["csv","xlsx"])
         if up_file:
             if st.button("Tabloya Aktar"):
-                # Encoding ve hata yakalama ile güvenli okuma
                 try:
-                    if up_file.name.endswith('csv'):
-                        new_data = pd.read_csv(up_file, encoding='utf-8-sig', errors='ignore')
-                    else:
-                        new_data = pd.read_excel(up_file)
+                    new_data = pd.read_csv(up_file, encoding='utf-8-sig', errors='ignore') if up_file.name.endswith('csv') else pd.read_excel(up_file)
                     conn.update(spreadsheet=edit_url, data=pd.concat([df, new_data], ignore_index=True))
                     st.cache_data.clear()
-                    st.success("Aktarıldı!")
-                except Exception as e: st.error(f"Dosya okuma hatası: {e}")
+                    st.success("Veriler eklendi!")
+                    st.rerun()
+                except Exception as e: st.error(f"Dosya hatası: {e}")
 
     with k2: st.link_button("🌐 Google Sheets'i Aç", edit_url)
     with k3: m_ac = st.toggle("✍️ Manuel Giriş / AI Onay")
@@ -139,24 +138,23 @@ else:
     up_img = st.file_uploader("📸 Fatura/Çek Görseli", type=["jpg","png","jpeg"])
     
     if up_img and st.button("AI İle Analiz Et"):
-        with st.spinner("Analiz ediliyor..."):
+        with st.spinner("İçerik okunuyor..."):
             try:
                 model = genai.GenerativeModel(target_model)
                 img = Image.open(up_img).convert("RGB")
-                prompt = "Respond ONLY with JSON: {'firma': 'str', 'tutar': float, 'vade': 'DD.MM.YYYY', 'banka': 'str'}"
+                prompt = "Analyze document. Respond ONLY with valid JSON: {'firma': 'str', 'tutar': float, 'vade': 'DD.MM.YYYY', 'banka': 'str'}"
                 resp = model.generate_content([prompt, img])
                 
-                # GELİŞMİŞ AI ÇIKTI KONTROLÜ
-                try:
-                    res_text = resp.text
-                except:
-                    # Alternatif SDK sürümleri için fallback
-                    res_text = resp.candidates[0].content.parts[0].text
+                # SDK Sürüm uyumluluğu
+                try: res_text = resp.text
+                except: res_text = resp.candidates[0].content.parts[0].text
                 
                 clean_json = res_text.strip().replace('```json', '').replace('```', '')
                 st.session_state.temp_data = json.loads(clean_json)
                 st.rerun()
-            except Exception as e: st.error(f"AI Okuma Hatası: {e}")
+            except Exception as e: 
+                st.error("AI okuyamadı, lütfen formu manuel doldurun.")
+                st.session_state.temp_data = {}
 
     if m_ac or 'temp_data' in st.session_state:
         td = st.session_state.get('temp_data', {})
@@ -174,10 +172,14 @@ else:
                 v_b = st.text_input("Banka", value=td.get('banka', ''))
                 v_d = st.selectbox("Döviz", ["TL", "USD", "EUR"])
             
+            # Kaydetme hatasını düzelten garanti blok
             if st.form_submit_button("✅ Kaydet"):
-                yeni = pd.DataFrame([{"Firma Adı": v_f, "Evrak Tipi": v_t, "Banka": v_b, "Tutar": v_m, "Vade": v_v.strftime('%d.%m.%Y'), "Döviz": v_d}])
-                conn.update(spreadsheet=edit_url, data=pd.concat([df, yeni], ignore_index=True))
-                st.cache_data.clear()
-                if 'temp_data' in st.session_state: del st.session_state.temp_data
-                st.success("Kayıt Başarılı!")
-                st.rerun()
+                try:
+                    yeni_row = pd.DataFrame([{"Firma Adı": v_f, "Evrak Tipi": v_t, "Banka": v_b, "Tutar": v_m, "Vade": v_v.strftime('%d.%m.%Y'), "Döviz": v_d}])
+                    conn.update(spreadsheet=edit_url, data=pd.concat([df, yeni_row], ignore_index=True))
+                    st.cache_data.clear()
+                    if 'temp_data' in st.session_state: del st.session_state.temp_data
+                    st.success("Kayıt Başarılı!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Kayıt Hatası: {e}. Lütfen Google Sheets API'nin açık olduğundan emin olun.")
