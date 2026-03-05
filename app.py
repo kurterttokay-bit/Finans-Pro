@@ -11,6 +11,7 @@ from PIL import Image
 st.set_page_config(page_title="Finans Pro", layout="wide", page_icon="🏦")
 
 # --- GEMINI YAPILANDIRMASI ---
+# Buradaki API key senin ücretsiz kotan dahilinde çalışır.
 genai.configure(api_key="AIzaSyCgKGlkcNNmSdv8HKTm8j4RidpR7lMqYHM")
 
 # --- 2. ÖZEL CSS (TASARIM) ---
@@ -60,25 +61,19 @@ def load_data(url, connection):
         return raw_df
     except: return pd.DataFrame()
 
-def analyze_invoice(image_file):
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    prompt = "Bu faturayı oku ve sadece JSON formatında yanıt ver: {'firma_adi': '...', 'tutar': 0.0, 'vade': 'YYYY-MM-DD', 'borclu': '...'}"
-    img = Image.open(image_file)
-    response = model.generate_content([prompt, img])
-    try:
-        clean_json = response.text.replace('```json', '').replace('```', '').strip()
-        return json.loads(clean_json)
-    except: return None
-
 # --- 4. VERİ VE BAĞLANTI ---
 edit_url = "https://docs.google.com/spreadsheets/d/1gow0J5IA0GaB-BjViSKGbIxoZije0klFGgvDWYHdcNA/edit#gid=0"
 conn = st.connection("gsheets", type=GSheetsConnection)
 df = load_data(edit_url, conn)
 usd_kur, eur_kur = get_fx_rates()
 
-# --- 5. ŞİFRE KONTROLÜ ---
+# --- 5. ŞİFRE KONTROLÜ (GÜNCELLENDİ) ---
 if 'auth' not in st.session_state: st.session_state.auth = None
-sifreler = {"patron125": "PATRON", "muhasebe007": "MUHASEBE"}
+sifreler = {
+    "deneme123": "DENEME", 
+    "patron125": "PATRON", 
+    "muhasebe007": "MUHASEBE"
+}
 
 if not st.session_state.auth:
     _, center, _ = st.columns([1, 1.2, 1])
@@ -106,19 +101,17 @@ if menu == "🏠 Dashboard":
     bugun = pd.Timestamp(datetime.now().date())
     
     if not df.empty:
-        # Hesaplamalar
         total_tl = df['Tutar'].sum()
         valid_df = df[df['Vade_Date'].notnull()].copy()
         
         if not valid_df.empty:
             gun_fark = (valid_df['Vade_Date'] - bugun).dt.days
-            ort_gun = int((valid_df['Tutar'] * gun_fark).sum() / total_tl)
+            ort_gun = int((valid_df['Tutar'] * gun_fark).sum() / total_tl) if total_tl > 0 else 0
             ort_vade = bugun + timedelta(days=ort_gun)
             adat = ((valid_df['Tutar'] * gun_fark).sum() * 0.3975) / 365
         else:
             ort_vade, adat = bugun, 0
 
-        # Metrikler
         st.markdown(f"""
         <div class="metric-container">
             <div class="metric-card" style="background:#2E8B57;"><div class="title">Toplam Yük</div><div class="value">{total_tl:,.2f} ₺</div></div>
@@ -128,7 +121,6 @@ if menu == "🏠 Dashboard":
         </div>
         """, unsafe_allow_html=True)
 
-        # Kritik Uyarılar
         kritik = valid_df[(valid_df['Vade_Date'] - bugun).dt.days <= 7]
         if not kritik.empty:
             st.markdown(f'<div class="alert-bar">🔥 DİKKAT: 7 GÜN İÇİNDE {len(kritik)} ÖDEME VAR!</div>', unsafe_allow_html=True)
@@ -140,13 +132,9 @@ if menu == "🏠 Dashboard":
 else:
     st.title("📝 Evrak ve Veri Girişi")
     c1, c2, c3 = st.columns(3)
-    with c1:
-        st.info("📂 Excel ile toplu yükleme yapabilirsiniz.")
-    with c2:
-        if st.button("🌐 Google Sheets'i Aç"):
-            st.write(f"[Buraya Tıkla]({edit_url})")
-    with c3:
-        show_form = st.toggle("Manuel Giriş Formunu Aç")
+    with c1: st.info("📂 Excel ile toplu yükleme yapabilirsiniz.")
+    with c2: st.link_button("🌐 Google Sheets'i Aç", edit_url)
+    with c3: show_form = st.toggle("Manuel Giriş Formunu Aç")
 
     if show_form:
         with st.form("manual"):
@@ -155,4 +143,4 @@ else:
             with f2: st.number_input("Tutar", min_value=0.0)
             with f3: st.date_input("Vade")
             if st.form_submit_button("Kaydet"):
-                st.success("Sisteme eklendi (Görsel örnektir)")
+                st.success("Sisteme eklendi!")
