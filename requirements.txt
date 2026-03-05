@@ -3,7 +3,7 @@ pandas
 plotly
 yfinance==0.2.37
 st-gsheets-connection
-google-generativeai
+google-generativeai>=0.8.3
 Pillow
 xlsxwriter
 openpyxl
