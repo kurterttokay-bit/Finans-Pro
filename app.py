@@ -7,7 +7,7 @@ import google.generativeai as genai
 from PIL import Image
 import json
 
-# --- 1. AYARLAR ---
+# --- 1. AYARLAR VE GÜVENLİK ---
 st.set_page_config(page_title="Finans Pro Enterprise", layout="wide", page_icon="🏦")
 
 if 'auth' not in st.session_state: st.session_state.auth = None
@@ -26,27 +26,23 @@ if not st.session_state.auth:
                 else: st.error("Hatalı!")
     st.stop()
 
-# --- 2. DİNAMİK MODEL SEÇİMİ (Çözüm: 404 Hatası) ---
-api_key = st.secrets.get("GEMINI_API_KEY") #
-target_model = "gemini-1.5-pro" # Güvenli varsayılan
+# --- 2. DİNAMİK AI MODEL SEÇİMİ ---
+api_key = st.secrets.get("GEMINI_API_KEY")
+target_model = "gemini-1.5-pro"  # garanti fallback
 
 if api_key:
     genai.configure(api_key=api_key)
     try:
-        # Mevcut modelleri tara ve isimlendirme hatasını (404) engelle
         available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        # En güncel modelleri önceliklendir
-        if any("flash-latest" in m for m in available_models):
-            target_model = [m for m in available_models if "flash-latest" in m][0]
-        elif any("flash" in m for m in available_models):
-            target_model = [m for m in available_models if "flash" in m][0]
-        elif any("pro" in m for m in available_models):
-            target_model = [m for m in available_models if "pro" in m][0]
-    except: pass
+        if any("1.5-flash-latest" in m for m in available_models):
+            target_model = [m for m in available_models if "1.5-flash-latest" in m][0]
+        elif any("1.5-flash" in m for m in available_models):
+            target_model = [m for m in available_models if "1.5-flash" in m][0]
+    except Exception as e:
+        st.sidebar.warning(f"Model listeleme hatası: {e}")
 
 # --- 3. VERİ BAĞLANTISI ---
 edit_url = "https://docs.google.com/spreadsheets/d/1gow0J5IA0GaB-BjViSKGbIxoZije0klFGgvDWYHdcNA/edit#gid=0"
-# Secrets altındaki service_account bilgilerini kullanır
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 @st.cache_data(ttl=60)
@@ -55,7 +51,7 @@ def get_fx_rates():
         usd = float(yf.download("USDTRY=X", period="1d", interval="1m", progress=False)['Close'].iloc[-1])
         eur = float(yf.download("EURTRY=X", period="1d", interval="1m", progress=False)['Close'].iloc[-1])
         return usd, eur
-    except: return 34.70, 37.55
+    except: return 34.65, 37.45
 
 def load_data():
     try:
@@ -81,7 +77,7 @@ with st.sidebar:
 
 # --- 5. DASHBOARD ---
 if menu == "🏠 Dashboard":
-    st.title("⚖️ Finansal Durum Paneli")
+    st.title("⚖️ Finansal Durum")
     df['Tutar_TL'] = df.apply(lambda r: r['Tutar'] * (usd_kur if r.get('Döviz') == 'USD' else (eur_kur if r.get('Döviz') == 'EUR' else 1)), axis=1)
     total_tl = df['Tutar_TL'].sum()
     bugun = pd.Timestamp(datetime.now().date())
@@ -100,28 +96,35 @@ if menu == "🏠 Dashboard":
     c3.metric("Adat Yükü", f"{adat_yuku:,.2f} ₺")
     st.dataframe(df.drop(columns=['Vade_Date', 'Tutar_TL']), use_container_width=True, hide_index=True)
 
-# --- 6. VERİ YÖNETİMİ (Çözüm: AI Okuma & Yazma) ---
+# --- 6. VERİ YÖNETİMİ ---
 else:
-    st.title("📝 Veri İşlem Merkezi")
-    up_img = st.file_uploader("📸 Fatura/Çek Görseli", type=["jpg","png","jpeg"])
+    st.title("📝 İşlem Merkezi")
+    
+    up_img = st.file_uploader("📸 Fatura/Çek Görseli (OCR Destekli)", type=["jpg","png","jpeg"])
     
     if up_img and st.button("AI İle Analiz Et"):
-        with st.spinner(f"Modelle analiz ediliyor: {target_model}"):
+        with st.spinner(f"{target_model} ile analiz ediliyor..."):
             try:
                 model = genai.GenerativeModel(target_model)
                 img = Image.open(up_img).convert("RGB")
-                # Katı prompt ve JSON güvenliği
-                prompt = "Analyze document. Return ONLY valid JSON: {'firma': 'str', 'tutar': float, 'vade': 'DD.MM.YYYY', 'banka': 'str'}"
+                prompt = """Perform OCR on this document.
+                Respond STRICTLY with valid JSON only.
+                Format: {"firma": "str", "tutar": float, "vade": "DD.MM.YYYY", "banka": "str"}"""
                 resp = model.generate_content([prompt, img])
                 
-                # SDK sürüm uyumlu yanıt okuma
-                try: res_text = resp.text
-                except: res_text = resp.candidates[0].content.parts[0].text
+                raw_text = getattr(resp, "text", None)
+                if not raw_text and hasattr(resp, "candidates"):
+                    raw_text = resp.candidates[0].content.parts[0].text
                 
-                clean_json = res_text.strip().replace('```json', '').replace('```', '')
-                st.session_state.temp_data = json.loads(clean_json)
-                st.success("Veriler yakalandı!")
-                st.rerun()
+                clean_json = raw_text.strip().replace('```json', '').replace('```', '')
+                try:
+                    st.session_state.temp_data = json.loads(clean_json)
+                    st.success("Veriler başarıyla ayrıştırıldı!")
+                    st.rerun()
+                except json.JSONDecodeError:
+                    st.warning("Model çıktı verdi ama JSON formatında değil. Ham metin aşağıda:")
+                    st.code(raw_text)
+                    st.session_state.temp_data = {}
             except Exception as e:
                 st.error(f"AI Analiz Hatası: {e}")
 
@@ -140,14 +143,13 @@ else:
                 v_v = st.date_input("Vade", value=dv)
                 v_d = st.selectbox("Döviz", ["TL", "USD", "EUR"])
             
-            if st.form_submit_button("✅ Kaydet"):
+            if st.form_submit_button("✅ Google Sheets'e Kaydet"):
                 try:
                     yeni_row = pd.DataFrame([{"Firma Adı": v_f, "Evrak Tipi": v_t, "Banka": v_b, "Tutar": v_m, "Vade": v_v.strftime('%d.%m.%Y'), "Döviz": v_d}])
-                    # Public Spreadsheet hatasını Service Account bağlantısıyla aş
                     conn.update(spreadsheet=edit_url, data=pd.concat([df, yeni_row], ignore_index=True))
                     st.cache_data.clear()
                     if 'temp_data' in st.session_state: del st.session_state.temp_data
-                    st.success("Google Sheets güncellendi!")
+                    st.success("Kayıt Başarılı!")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Yazma Hatası: {e}. GSheets API aktif mi?")
+                    st.error(f"Kayıt Hatası: {e}. GSheets API yetkilerini kontrol edin.")
