@@ -52,8 +52,69 @@ WORKSHEET_NAME = "Sayfa1"  # Google Sheets worksheet
 # -------------------------
 # THEME (Light/Dark)
 # -------------------------
-if "theme_mode" not in st.session_state:
-    st.session_state.theme_mode = "Light"
+
+
+# -------------------------
+# THEME (auto from device, user override via sidebar)
+# -------------------------
+from streamlit import components
+
+def _get_query_params():
+    # Streamlit versions differ: try modern st.query_params first
+    try:
+        return dict(st.query_params)
+    except Exception:
+        try:
+            return st.experimental_get_query_params()
+        except Exception:
+            return {}
+
+def _set_query_params(**kwargs):
+    try:
+        st.query_params.update(kwargs)  # modern API
+    except Exception:
+        st.experimental_set_query_params(**kwargs)
+
+def bootstrap_theme():
+    """Initialize theme_mode from URL (?theme=dark|light) or from device preference (prefers-color-scheme).
+    Uses a one-time JS redirect if theme isn't known yet.
+    """
+    qp = _get_query_params()
+    if "theme_mode" in st.session_state:
+        return
+
+    qp_theme = None
+    if isinstance(qp, dict):
+        raw = qp.get("theme")
+        if isinstance(raw, list) and raw:
+            raw = raw[0]
+        if isinstance(raw, str) and raw.strip():
+            qp_theme = raw.strip().lower()
+
+    if qp_theme in ("dark", "light"):
+        st.session_state.theme_mode = "Dark" if qp_theme == "dark" else "Light"
+        return
+
+    # No theme in URL and not set in session -> detect from device and set URL once (forces rerun)
+    components.v1.html(
+        """<script>
+        (function() {
+          try {
+            const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const theme = prefersDark ? 'dark' : 'light';
+            const url = new URL(window.location.href);
+            if (!url.searchParams.get('theme')) {
+              url.searchParams.set('theme', theme);
+              window.location.replace(url.toString());
+            }
+          } catch (e) {}
+        })();
+        </script>""",
+        height=0,
+    )
+    st.stop()
+
+bootstrap_theme()
 
 def inject_theme_css(theme: str):
     """
@@ -261,7 +322,33 @@ def inject_theme_css(theme: str):
         color: {muted};
         line-height: 1.3;
     }}
-    </style>
+    
+    /* ---- Segmented step selector (horizontal radio) ---- */
+    div[data-testid="stRadio"] > div[role="radiogroup"] {
+        gap: 10px;
+        flex-wrap: nowrap;
+    }
+    div[data-testid="stRadio"] label {
+        border: 1px solid {border};
+        background: {card};
+        border-radius: 14px;
+        padding: 14px 14px;
+        min-height: 66px;
+        align-items: flex-start;
+        box-shadow: {shadow};
+    }
+    div[data-testid="stRadio"] label p {
+        font-weight: 600;
+        margin-top: -2px;
+    }
+    div[data-testid="stRadio"] label:hover {
+        border-color: rgba(59,130,246,.45);
+    }
+    div[data-testid="stRadio"] input:checked + div {
+        border-radius: 12px;
+    }
+
+</style>
     """
     st.markdown(css, unsafe_allow_html=True)
 # -------------------------
@@ -324,6 +411,28 @@ def get_model_name():
 
 MODEL_NAME = get_model_name()
 model = genai.GenerativeModel(MODEL_NAME)
+
+
+FALLBACK_MODELS = [
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+    "gemini-pro",
+]
+
+def _generate_with_fallback(parts):
+    """Try generate_content with a few model names to survive 404 / unsupported errors."""
+    last_err = None
+    tried = []
+    for name in [MODEL_NAME] + [m for m in FALLBACK_MODELS if m != MODEL_NAME]:
+        try:
+            tried.append(name)
+            m = genai.GenerativeModel(name)
+            resp = m.generate_content(parts)
+            return resp, name
+        except Exception as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"AI çağrısı başarısız. Denenen modeller: {tried}. Son hata: {last_err}")
 
 # -------------------------
 # GSHEETS CONNECTION
@@ -503,7 +612,7 @@ Notlar:
 """
 
     try:
-        response = model.generate_content([prompt, image])
+        response, used_model = _generate_with_fallback([prompt, image])
         text = getattr(response, "text", "") or ""
         if not text and getattr(response, "candidates", None):
             text = response.candidates[0].content.parts[0].text
@@ -549,6 +658,58 @@ Notlar:
     except Exception as e:
         logging.exception(e)
         return None
+
+def analyze_invoice_text_only(ocr_text: str):
+    """Fallback extraction when we can't render a PDF to image."""
+    prompt = f"""
+Sen bir finans muhasebe asistanısın. Elinde sadece metin var (PDF içi metin/OCR).
+
+OCR_METIN:
+{ocr_text[:8000]}
+
+SADECE JSON döndür. Açıklama ekleme.
+
+Şu şemaya uy:
+{{
+  "firma_adi": "",
+  "evrak_tipi": "Fatura",
+  "tutar": 0,
+  "vade": "DD.MM.YYYY",
+  "aciklama": "",
+  "evrak_no": "",
+  "doviz": "TL"
+}}
+
+Notlar:
+- vade yoksa fatura tarihini vade olarak yaz.
+- tutarı KDV dahil toplam ödenecek tutar olarak yakala.
+- dövizi bulamazsan TL yaz.
+- evrak_no: fatura no.
+"""
+
+    try:
+        response, used_model = _generate_with_fallback([prompt])
+        text = getattr(response, "text", "") or ""
+        if not text and getattr(response, "candidates", None):
+            text = response.candidates[0].content.parts[0].text
+
+        m = re.search(r"\{.*\}", text, re.S)
+        if not m:
+            return None
+        data = json.loads(m.group(0))
+        return {
+            "Firma Adı": str(data.get("firma_adi", "")).strip(),
+            "Evrak Tipi": str(data.get("evrak_tipi", "Fatura")).strip() or "Fatura",
+            "Tutar": float(data.get("tutar", 0) or 0),
+            "Vade": str(data.get("vade", "")).strip(),
+            "Açıklama": str(data.get("aciklama", "")).strip(),
+            "Evrak No": str(data.get("evrak_no", "")).strip(),
+            "Döviz": str(data.get("doviz", "TL")).strip() or "TL",
+        }
+    except Exception as e:
+        st.error(f"AI hata: {e}")
+        return None
+
 
 def archive_invoice(image: Image.Image) -> str:
     os.makedirs("invoices", exist_ok=True)
@@ -628,7 +789,17 @@ with st.sidebar:
     st.title("🏦 Finans Panel")
 
     # Theme toggle
-    st.session_state.theme_mode = st.radio("Tema", ["Light", "Dark"], horizontal=True, index=0 if st.session_state.theme_mode == "Light" else 1)
+    theme_choice = st.radio(
+        "Tema",
+        ["Light", "Dark"],
+        horizontal=True,
+        index=0 if st.session_state.theme_mode == "Light" else 1,
+        key="theme_choice_radio",
+    )
+    if theme_choice != st.session_state.theme_mode:
+        st.session_state.theme_mode = theme_choice
+        _set_query_params(theme="dark" if theme_choice == "Dark" else "light")
+        st.rerun()
     inject_theme_css(st.session_state.theme_mode)
 
     with st.container(border=True):
@@ -896,25 +1067,29 @@ elif menu == "İşlem Merkezi":
         unsafe_allow_html=True
     )
 
-    # --- Stepper ---
-    st.markdown(
-        """
-        <div class="stepper">
-          <div class="step"><div class="t">1) Şablon indir</div><div class="d">Excel’i indir, offline doldur.</div></div>
-          <div class="step"><div class="t">2) Upload & işle</div><div class="d">Yükle, önizle, Sheets’e aktar.</div></div>
-          <div class="step"><div class="t">3) Sheets’te devam</div><div class="d">Doğrudan Google Sheets’i aç.</div></div>
-          <div class="step"><div class="t">4) Tara & ekle</div><div class="d">PDF/Foto → alan çıkar → Sheets.</div></div>
-        </div>
-        """,
-        unsafe_allow_html=True
+    
+    # --- Step selector (click -> content below) ---
+    step = st.radio(
+        "Akış seç",
+        ["1) Şablon indir", "2) Upload & işle", "3) Sheets’te devam", "4) Tara & ekle"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="op_step",
     )
 
-    a, b = st.columns(2, gap="large")
-    c, d = st.columns(2, gap="large")
+    # Small helper line under the selector
+    step_desc = {
+        "1) Şablon indir": "Excel şablonunu indir, offline doldur.",
+        "2) Upload & işle": "Doldurduğun Excel’i yükle, önizle, Sheets’e aktar.",
+        "3) Sheets’te devam": "Google Sheets’i aç, doğrudan orada düzenle.",
+        "4) Tara & ekle": "PDF/Foto yükle → alanları çıkar → Sheets’e ekle (olmazsa manuel gir).",
+    }
+    st.markdown(f"<div class='muted' style='margin-top:-6px;margin-bottom:14px'>{step_desc.get(step,'')}</div>", unsafe_allow_html=True)
 
-    with a:
-        with st.container(border=True):
-            card_header("1) Taslak Excel indir", badge="Şablon", subtitle="İndir, doldur, sonra upload et.")
+    # --- Content area ---
+    with st.container(border=True):
+        if step == "1) Şablon indir":
+            card_header("Şablon indir", badge="Şablon", subtitle="Excel’i indir, offline doldur, sonra upload et.")
             st.download_button(
                 "📥 Taslağı indir (.xlsx)",
                 data=make_template_xlsx(),
@@ -924,9 +1099,8 @@ elif menu == "İşlem Merkezi":
             )
             st.markdown("<div class='muted'>Sheet adı: <b>Sayfa1</b>. Kolonlar otomatik normalize edilir.</div>", unsafe_allow_html=True)
 
-    with b:
-        with st.container(border=True):
-            card_header("2) Excel Upload → Google Sheets'e işle", badge="Import", subtitle="Doldurduğun Excel'i yükle, önizle ve aktar.")
+        elif step == "2) Upload & işle":
+            card_header("Excel Upload → Google Sheets'e işle", badge="Import", subtitle="Yükle, önizle ve aktar.")
             up = st.file_uploader("Excel yükle (.xlsx)", type=["xlsx"], key="upl_xlsx")
             mode = st.selectbox("Aktarım modu", ["Ekle (append)", "Yerine yaz (overwrite)"], index=0)
 
@@ -936,7 +1110,7 @@ elif menu == "İşlem Merkezi":
                     incoming_view = incoming.drop(columns=["Vade_Date"], errors="ignore")
 
                     st.markdown("<div class='muted'>Önizleme (ilk 20 satır):</div>", unsafe_allow_html=True)
-                    st.dataframe(incoming_view.head(20), use_container_width=True, height=230)
+                    st.dataframe(incoming_view.head(20), use_container_width=True, height=260)
 
                     nonblank = incoming.copy()
                     mask_blank = (
@@ -968,9 +1142,8 @@ elif menu == "İşlem Merkezi":
                 except Exception as e:
                     st.error(f"Excel okunamadı: {e}")
 
-    with c:
-        with st.container(border=True):
-            card_header("3) Google Sheets'te devam et", badge="Live", subtitle="Sheet'i aç, doğrudan oradan düzenle.")
+        elif step == "3) Sheets’te devam":
+            card_header("Google Sheets'te devam et", badge="Live", subtitle="Sheet'i aç, doğrudan oradan düzenle.")
             sheets_url = st.secrets.get("SHEETS_URL", "")
             if sheets_url:
                 st.link_button("🔗 Google Sheets'i aç", sheets_url, use_container_width=True)
@@ -978,12 +1151,9 @@ elif menu == "İşlem Merkezi":
             else:
                 st.warning("SHEETS_URL secrets içinde yok. Streamlit → Settings → Secrets → SHEETS_URL")
 
-    with d:
-        with st.container(border=True):
-            card_header("4) Tarama → Otomatik Sheets'e ekle", badge="AI + OCR", subtitle="PDF/Foto yükle, AI alanları çıkarıp kaydetsin. Olmazsa manuel gir.")
-            types = ["png", "jpg", "jpeg"]
-            if PDF_ENABLED:
-                types.append("pdf")
+        else:
+            card_header("Tarama → Otomatik Sheets'e ekle", badge="AI + OCR", subtitle="PDF/Foto yükle, AI alanları çıkarıp kaydetsin. Olmazsa manuel gir.")
+            types = ["png", "jpg", "jpeg", "pdf"]  # pdf'yi her zaman kabul et
             scan_file = st.file_uploader("Evrak yükle (PDF/Resim)", type=types, key="scan_file")
 
             do_ocr = st.checkbox("OCR kullan (varsa)", value=False, disabled=not OCR_ENABLED, key="scan_ocr")
@@ -991,15 +1161,33 @@ elif menu == "İşlem Merkezi":
 
             if scan_file and st.button("🧠 Tara & çıkar", use_container_width=True, key="btn_scan"):
                 raw_image = None
+                ocr_text = ""
+
                 if scan_file.type == "application/pdf":
-                    if not PDF_ENABLED:
-                        st.error("PDF desteği kapalı. packages.txt içine poppler-utils ekleyip Reboot edin.")
-                    else:
-                        pdf_bytes = scan_file.read()
+                    pdf_bytes = scan_file.read()
+
+                    # 1) Eğer pdf2image varsa ilk sayfayı görsele çevir
+                    if PDF_ENABLED:
                         try:
                             raw_image = pdf_first_page_to_image(pdf_bytes, dpi=350)
                         except Exception as e:
                             st.error(f"PDF görsele çevrilemedi: {e}")
+
+                    # 2) pdf2image yoksa en azından metin çekmeye çalış (OCR/AI için)
+                    if raw_image is None:
+                        try:
+                            import PyPDF2
+                            reader = PyPDF2.PdfReader(BytesIO(pdf_bytes))
+                            extracted = []
+                            for p in reader.pages[:3]:
+                                t = p.extract_text() or ""
+                                if t.strip():
+                                    extracted.append(t)
+                            ocr_text = "\n".join(extracted)[:8000]
+                            if not ocr_text.strip():
+                                st.warning("PDF metni çıkarılamadı. Poppler (pdf2image) kurulu değilse tarama sınırlı olur.")
+                        except Exception:
+                            st.warning("PDF metni çıkarılamadı. Daha iyi tarama için poppler-utils (pdf2image) önerilir.")
                 else:
                     try:
                         raw_image = Image.open(scan_file).convert("RGB")
@@ -1009,10 +1197,9 @@ elif menu == "İşlem Merkezi":
                 if raw_image is not None:
                     image = enhance_for_reading(raw_image)
                     qr_list = decode_qr_opencv(raw_image) or decode_qr_opencv(image)
-                    ocr_text = ""
                     if do_ocr:
                         with st.spinner("OCR okunuyor..."):
-                            ocr_text = ocr_read(image)
+                            ocr_text = (ocr_text + "\n" + ocr_read(image)).strip()
 
                     with st.spinner("AI alanları çıkarıyor..."):
                         result = analyze_invoice(image, ocr_text=ocr_text, qr_list=qr_list)
@@ -1025,6 +1212,21 @@ elif menu == "İşlem Merkezi":
                         st.warning("Tarama başarısız / düşük kalite. Aşağıdan manuel giriş yapabilirsin.")
                         st.session_state["_scan_result"] = None
                         st.session_state["_scan_image"] = None
+                else:
+                    # Görsel yok (PDF->image yok) ama metin varsa, metinle dene
+                    if ocr_text.strip():
+                        with st.spinner("AI (metin) alanları çıkarıyor..."):
+                            result = analyze_invoice_text_only(ocr_text)
+                        if result:
+                            st.success("✅ Alanlar çıkarıldı. Kaydetmeden önce gözden geçir.")
+                            st.session_state["_scan_result"] = result
+                            st.session_state["_scan_image"] = None
+                        else:
+                            st.warning("Metinden alan çıkarılamadı. Manuel girişe geç.")
+                    else:
+                        st.warning("Tarama için görsel üretilemedi. Manuel girişe geç.")
+
+            # Existing quick edit block stays as-is (below)
 
             result = st.session_state.get("_scan_result")
             image = st.session_state.get("_scan_image")
