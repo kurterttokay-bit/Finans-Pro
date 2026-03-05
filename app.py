@@ -112,7 +112,7 @@ else:
     if up_img and st.button("AI İle Analiz Et"):
         with st.spinner("AI analiz ediyor..."):
             try:
-                model = genai.GenerativeModel('gemini-1.5-flash-latest')
+                model = genai.GenerativeModel('gemini-1.5-flash')
                 img = Image.open(up_img).convert("RGB")
                 prompt = "Respond ONLY with JSON: {'firma': 'str', 'tutar': float, 'vade': 'DD.MM.YYYY', 'banka': 'str'}"
                 resp = model.generate_content([prompt, img])
