@@ -127,7 +127,6 @@ else:
                     st.session_state.temp_data = {}
             except Exception as e:
                 st.error(f"AI Analiz Hatası: {e}")
-
     # --- MANUEL GİRİŞ ---
     if 'temp_data' in st.session_state or st.toggle("Manuel Giriş"):
         td = st.session_state.get('temp_data', {})
@@ -139,8 +138,10 @@ else:
                 v_m = st.number_input("Tutar", value=float(td.get('tutar', 0.0)))
             with col2:
                 v_b = st.text_input("Banka", value=td.get('banka', ''))
-                try: dv = datetime.strptime(td.get('vade', ''), '%d.%m.%Y')
-                except: dv = datetime.now()
+                try:
+                    dv = datetime.strptime(td.get('vade', ''), '%d.%m.%Y')
+                except:
+                    dv = datetime.now()
                 v_v = st.date_input("Vade", value=dv)
                 v_d = st.selectbox("Döviz", ["TL", "USD", "EUR"])
             
@@ -154,6 +155,15 @@ else:
                         "Vade": v_v.strftime('%d.%m.%Y'),
                         "Döviz": v_d
                     }])
-                    conn.update(spreadsheet=edit_url, data=pd.concat([df, yeni_row], ignore_index=True))
+                    # Google Sheets'e yazma
+                    conn.update(
+                        spreadsheet=edit_url,
+                        data=pd.concat([df, yeni_row], ignore_index=True)
+                    )
                     st.cache_data.clear()
-                    if 'temp_data' in st.session
+                    if 'temp_data' in st.session_state:
+                        del st.session_state.temp_data
+                    st.success("Kayıt Başarılı!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Kayıt Hatası: {e}. GSheets API yetkilerini kontrol edin.")
