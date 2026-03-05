@@ -362,19 +362,21 @@ def kpi(label, value, delta=None, help_text=None):
 
 
 # -------------------------
-# SIDEBAR
+# SIDEBAR (menu + adat + cache)
 # -------------------------
 with st.sidebar:
+    st.title("🏦 Finans Panel")
+    st.info(f"Kullanıcı: Kurter\nYetki: {ROLE}")
+
+    menu = st.radio("Menü", ["Dashboard", "İşlem Merkezi", "AI Evrak Analizi", "AI CFO Chat"])
+    adat_rate = st.number_input("Adat Faizi %", value=39.75) / 100
+
+    st.divider()
+
     if st.button("🧹 Cache temizle"):
         st.cache_data.clear()
-        st.success("Cache temizlendi. Sayfayı yenile.")
+        st.success("Cache temizlendi.")
         st.rerun()
-
-    with st.expander("🛠️ Google Sheets Debug"):
-        st.write("Son hata:")
-        st.code(st.session_state.get("_gsheets_last_error", "Yok"))
-        st.write("Okunan satır sayısı:", len(df))
-        st.write("Kolonlar:", list(df.columns) if not df.empty else [])
 
 # -------------------------
 # LOAD
