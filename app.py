@@ -735,14 +735,36 @@ elif menu == "AI Evrak Analizi":
     if uploaded:
         # load image
         image = None
-        if uploaded.type == "application/pdf":
-            if not PDF_ENABLED:
-                st.error("PDF desteği kapalı. pdf2image/poppler kurulmalı.")
-                st.stop()
-            pages = convert_from_bytes(uploaded.read())
-            image = pages[0].convert("RGB")
-        else:
-            image = Image.open(uploaded).convert("RGB")
+        raw_image = None
+
+if uploaded.type == "application/pdf":
+    if not PDF_ENABLED:
+        st.error("PDF desteği kapalı. packages.txt -> poppler-utils gerekli.")
+        st.stop()
+    pdf_bytes = uploaded.read()
+    raw_image = pdf_first_page_to_image(pdf_bytes, dpi=350)
+else:
+    raw_image = Image.open(uploaded).convert("RGB")
+
+# iyileştirilmiş versiyon
+image = enhance_for_reading(raw_image)
+
+# ekranda ikisini de göster (farkı gör)
+c1, c2 = st.columns(2)
+with c1:
+    st.caption("Orijinal")
+    st.image(raw_image, use_container_width=True)
+with c2:
+    st.caption("İyileştirilmiş (AI/OCR için)")
+    st.image(image, use_container_width=True)
+
+# QR oku
+qr_list = decode_qr(raw_image) or decode_qr(image)
+if qr_list:
+    st.success("✅ QR bulundu")
+    st.write(qr_list)
+else:
+    st.warning("QR bulunamadı (zbar/pyzbar kurulu mu, QR çok küçük mü?)")
 
         st.image(image, width=420)
 
