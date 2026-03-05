@@ -10,5 +10,3 @@ google-auth
 st-gsheets-connection
 pytesseract
 pdf2image
-streamlit-gsheets
-
