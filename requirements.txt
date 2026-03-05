@@ -2,8 +2,9 @@ streamlit
 pandas
 plotly
 yfinance==0.2.37
-st-gsheets-connection
 google-generativeai>=0.8.3
 Pillow
 xlsxwriter
 openpyxl
+st-gsheets-connection==0.0.3
+google-auth==2.27.0
