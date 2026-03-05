@@ -53,13 +53,12 @@ WORKSHEET_NAME = "Sayfa1"  # Google Sheets worksheet
 # THEME (Light/Dark)
 # -------------------------
 if "theme_mode" not in st.session_state:
-    st.session_state.theme_mode = "Dark"
+    st.session_state.theme_mode = "Light"
 
 def inject_theme_css(theme: str):
     """
-    Streamlit'in built-in theme ayarları runtime'da değişmediği için,
-    Light/Dark için CSS token'ları enjekte ediyoruz.
-    Not: f-string içinde CSS blok parantezleri {{ }} olmalı.
+    Streamlit built-in theme runtime'da değişmediği için Light/Dark görünümü CSS ile token'lıyoruz.
+    Önemli: f-string içinde CSS blok parantezleri {{ }} olmalı.
     """
     is_light = str(theme).lower().startswith("l")
 
@@ -69,22 +68,36 @@ def inject_theme_css(theme: str):
         text = "#0F172A"
         muted = "#475569"
         border = "rgba(2, 6, 23, .10)"
-        card = "rgba(255,255,255,.90)"
-        shadow = "0 10px 30px rgba(16,24,40,0.10)"
+        card = "#FFFFFF"
+        card2 = "rgba(15, 23, 42, .02)"
+        shadow = "0 10px 26px rgba(16,24,40,0.08)"
+        input_bg = "#FFFFFF"
     else:
         bg = "#0B1220"
-        panel = "rgba(15, 23, 42, .60)"
+        panel = "rgba(15, 23, 42, .70)"
         text = "#E5E7EB"
         muted = "#9CA3AF"
         border = "rgba(148, 163, 184, .18)"
-        card = "rgba(2, 6, 23, .35)"
-        shadow = "0 12px 34px rgba(0,0,0,.22)"
+        card = "rgba(2, 6, 23, .38)"
+        card2 = "rgba(255,255,255,.03)"
+        shadow = "0 14px 34px rgba(0,0,0,.24)"
+        input_bg = "rgba(255,255,255,.04)"
 
     css = f"""
     <style>
-    /* App base */
+    /* ---- Layout (SaaS-like width + spacing) ---- */
+    .block-container {{
+        max-width: 1180px;
+        padding-top: 1.25rem;
+        padding-bottom: 2.5rem;
+    }}
+
+    /* ---- Base ---- */
     .stApp {{
         background: {bg};
+        color: {text};
+    }}
+    [data-testid="stMarkdownContainer"] {{
         color: {text};
     }}
 
@@ -98,63 +111,63 @@ def inject_theme_css(theme: str):
     h1, h2, h3, h4 {{
         color: {text};
         letter-spacing: -0.02em;
+        line-height: 1.15;
     }}
     .muted {{
         color: {muted} !important;
     }}
 
-
-    /* Layout: center + comfortable width */
-    div.block-container {{
-        padding-top: 1.2rem;
-        padding-bottom: 2.0rem;
-        max-width: 1180px;
-    }}
-
-    /* Typography: more SaaS-like scale */
-    h1 {{ font-size: 2.0rem; margin-bottom: .2rem; }}
-    h2 {{ font-size: 1.35rem; margin-top: 1.1rem; }}
-    h3 {{ font-size: 1.05rem; }}
-
-    /* Card header */
-    .card-head {{ margin-bottom: 0.75rem; }}
-    .card-head-row {{ display:flex; align-items:center; justify-content:space-between; gap:.75rem; }}
-    .card-title {{ font-size: 1.15rem; font-weight: 750; letter-spacing: -0.02em; line-height: 1.2; }}
-    .card-subtitle {{ margin-top: 0.35rem; font-size: 0.95rem; }}
-    .badge {{
-        font-size: 0.75rem;
-        padding: 0.20rem 0.55rem;
-        border-radius: 999px;
-        border: 1px solid {border};
-        background: rgba(255,255,255,.04);
-        color: {text};
-        white-space: nowrap;
-    }}
-
-    /* Reduce “giant” widget labels a bit */
-    label, .stMarkdown p {{ font-size: 0.95rem; }}
-
-    /* Make native bordered containers look like cards */
+    /* ---- Cards: use Streamlit native bordered containers ---- */
     div[data-testid="stVerticalBlockBorderWrapper"] {{
         background: {card};
         border: 1px solid {border};
         border-radius: 16px;
-        padding: 18px 18px 14px 18px;
+        padding: 16px 16px 12px 16px;
         box-shadow: {shadow};
-        backdrop-filter: blur(8px);
+        backdrop-filter: blur(10px);
     }}
 
-    /* Buttons */
+    /* ---- Buttons ---- */
     .stDownloadButton button, .stButton button {{
         border-radius: 12px !important;
         border: 1px solid {border} !important;
+        background: {card2} !important;
+        color: {text} !important;
+    }}
+    .stDownloadButton button:hover, .stButton button:hover {{
+        filter: brightness(1.06);
+        transform: translateY(-1px);
+    }}
+
+    /* ---- Inputs / Selects: fix "Light mode görünmüyor" ---- */
+    .stTextInput input, .stNumberInput input {{
+        background: {input_bg} !important;
+        color: {text} !important;
+        border: 1px solid {border} !important;
+        border-radius: 12px !important;
+    }}
+    .stTextArea textarea {{
+        background: {input_bg} !important;
+        color: {text} !important;
+        border: 1px solid {border} !important;
+        border-radius: 12px !important;
+    }}
+    div[data-baseweb="select"] > div {{
+        background: {input_bg} !important;
+        border: 1px solid {border} !important;
+        border-radius: 12px !important;
+        color: {text} !important;
+    }}
+    div[data-baseweb="select"] span {{
+        color: {text} !important;
     }}
 
     /* File uploader dropzone */
     div[data-testid="stFileUploaderDropzone"] {{
         border-radius: 14px;
         border: 1px dashed {border};
-        background: rgba(255,255,255,.03);
+        background: {card2};
+        color: {text};
     }}
 
     /* Dataframe */
@@ -162,6 +175,91 @@ def inject_theme_css(theme: str):
         border-radius: 12px;
         overflow: hidden;
         border: 1px solid {border};
+    }}
+
+    /* Badges + accent line */
+    .badge {{
+        font-size: 12px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid {border};
+        background: {card2};
+        color: {muted};
+        white-space: nowrap;
+    }}
+    .accent-line {{
+        height: 3px;
+        width: 52px;
+        border-radius: 999px;
+        background: rgba(99, 102, 241, .8);
+        margin-top: 10px;
+        margin-bottom: 4px;
+    }}
+
+    /* Hero */
+    .hero {{
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-end;
+        gap: 12px;
+        margin: 6px 0 18px 0;
+    }}
+    .hero h1 {{
+        font-size: 34px;
+        margin: 0;
+    }}
+    .hero p {{
+        margin: 8px 0 0 0;
+        color: {muted};
+        max-width: 680px;
+    }}
+    .kpi-row {{
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
+        margin-bottom: 16px;
+    }}
+    .kpi {{
+        background: {card};
+        border: 1px solid {border};
+        border-radius: 16px;
+        padding: 12px 14px;
+        box-shadow: {shadow};
+    }}
+    .kpi .label {{
+        color: {muted};
+        font-size: 12px;
+        margin-bottom: 6px;
+    }}
+    .kpi .value {{
+        font-size: 18px;
+        font-weight: 700;
+        color: {text};
+    }}
+
+    /* Stepper */
+    .stepper {{
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 10px;
+        margin: 10px 0 18px 0;
+    }}
+    .step {{
+        border: 1px solid {border};
+        background: {card2};
+        border-radius: 14px;
+        padding: 10px 12px;
+    }}
+    .step .t {{
+        font-weight: 700;
+        font-size: 13px;
+        margin-bottom: 4px;
+        color: {text};
+    }}
+    .step .d {{
+        font-size: 12px;
+        color: {muted};
+        line-height: 1.3;
     }}
     </style>
     """
@@ -503,19 +601,20 @@ def kpi(label, value, delta=None, help_text=None):
         unsafe_allow_html=True
     )
 
-
 def card_header(title: str, badge: str | None = None, subtitle: str | None = None):
-    """Kart başlığı: tek markdown ile render (Streamlit HTML wrapper sorunlarını önler)."""
+    """Kart başlığı: tek render (duplicate yok)."""
     badge_html = f"<span class='badge'>{badge}</span>" if badge else ""
-    subtitle_html = f"<div class='card-subtitle muted'>{subtitle}</div>" if subtitle else ""
+    subtitle_html = f"<div class='muted' style='margin-top:6px'>{subtitle}</div>" if subtitle else ""
+    line_html = "<div class='accent-line'></div>" if subtitle else ""
     st.markdown(
         f"""
         <div class="card-head">
-          <div class="card-head-row">
-            <div class="card-title">{title}</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+            <h3 style="margin:0;font-size:20px">{title}</h3>
             {badge_html}
           </div>
           {subtitle_html}
+          {line_html}
         </div>
         """,
         unsafe_allow_html=True
@@ -524,11 +623,12 @@ def card_header(title: str, badge: str | None = None, subtitle: str | None = Non
 # -------------------------
 # SIDEBAR (menu + settings)
 # -------------------------
+# -------------------------
 with st.sidebar:
     st.title("🏦 Finans Panel")
 
     # Theme toggle
-    st.session_state.theme_mode = st.radio("Tema", ["Dark", "Light"], horizontal=True, index=0 if st.session_state.theme_mode == "Dark" else 1)
+    st.session_state.theme_mode = st.radio("Tema", ["Light", "Dark"], horizontal=True, index=0 if st.session_state.theme_mode == "Light" else 1)
     inject_theme_css(st.session_state.theme_mode)
 
     with st.container(border=True):
@@ -761,10 +861,53 @@ VERİ:
 # -------------------------
 # İŞLEM MERKEZİ (4 kutu)
 # -------------------------
+
 elif menu == "İşlem Merkezi":
-    st.title("🧾 İşlem Merkezi")
-    st.markdown("<div class='muted'>4 farklı akış: Excel şablon → Upload → Sheets, doğrudan Sheets, tarama ile otomatik ekleme.</div>", unsafe_allow_html=True)
-    st.markdown("<div class='accent-line'></div>", unsafe_allow_html=True)
+    # --- Hero header ---
+    st.markdown(
+        """
+        <div class="hero">
+          <div>
+            <h1>İşlem Merkezi</h1>
+            <p>Evraklarını 4 farklı yolla aynı düzene (Google Sheets) aktar: şablon Excel, Excel upload, doğrudan Sheets, tarama + otomatik ekleme.</p>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # --- KPIs (lightweight, güvenli) ---
+    total_records = int(len(df)) if "df" in globals() and isinstance(df, pd.DataFrame) else 0
+    distinct_firms = 0
+    if "df" in globals() and isinstance(df, pd.DataFrame):
+        for col in ["Firma", "firma", "vendor", "Vendor", "Tedarikçi", "Cari"]:
+            if col in df.columns:
+                distinct_firms = int(df[col].dropna().astype(str).nunique())
+                break
+
+    st.markdown(
+        f"""
+        <div class="kpi-row">
+          <div class="kpi"><div class="label">Toplam kayıt</div><div class="value">{total_records:,}</div></div>
+          <div class="kpi"><div class="label">Benzersiz firma</div><div class="value">{distinct_firms:,}</div></div>
+          <div class="kpi"><div class="label">Akış</div><div class="value">Şablon • Upload • Sheets • Tarama</div></div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # --- Stepper ---
+    st.markdown(
+        """
+        <div class="stepper">
+          <div class="step"><div class="t">1) Şablon indir</div><div class="d">Excel’i indir, offline doldur.</div></div>
+          <div class="step"><div class="t">2) Upload & işle</div><div class="d">Yükle, önizle, Sheets’e aktar.</div></div>
+          <div class="step"><div class="t">3) Sheets’te devam</div><div class="d">Doğrudan Google Sheets’i aç.</div></div>
+          <div class="step"><div class="t">4) Tara & ekle</div><div class="d">PDF/Foto → alan çıkar → Sheets.</div></div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     a, b = st.columns(2, gap="large")
     c, d = st.columns(2, gap="large")
