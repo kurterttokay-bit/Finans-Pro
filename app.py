@@ -57,174 +57,84 @@ if "theme_mode" not in st.session_state:
 
 def inject_theme_css(theme: str):
     """
-    Streamlit'in yerleşik theme ayarları runtime'da değişmediği için,
-    modern dashboard hissi veren iki ayrı CSS paletiyle görünümü iyileştiriyoruz.
+    Streamlit'in built-in theme ayarları runtime'da değişmediği için,
+    Light/Dark için CSS token'ları enjekte ediyoruz.
+    Not: f-string içinde CSS blok parantezleri {{ }} olmalı.
     """
-    if theme == "Light":
-        bg = "#F7F7FB"
-        card = "#FFFFFF"
-        card2 = "#FFFFFF"
-        text = "#0B1220"
-        muted = "rgba(11,18,32,0.72)"
-        border = "rgba(11,18,32,0.10)"
+    is_light = str(theme).lower().startswith("l")
+
+    if is_light:
+        bg = "#F6F7FB"
+        panel = "#FFFFFF"
+        text = "#0F172A"
+        muted = "#475569"
+        border = "rgba(2, 6, 23, .10)"
+        card = "rgba(255,255,255,.90)"
         shadow = "0 10px 30px rgba(16,24,40,0.10)"
-        accent = "#2563EB"
-        accent2 = "#7C3AED"
-        kpi_bg = "linear-gradient(135deg, rgba(37,99,235,0.08), rgba(124,58,237,0.06))"
     else:
-        bg = "#0B1020"
-        card = "rgba(255,255,255,0.06)"
-        card2 = "rgba(255,255,255,0.04)"
-        text = "#E8ECF6"
-        muted = "rgba(232,236,246,0.72)"
-        border = "rgba(255,255,255,0.10)"
-        shadow = "0 14px 40px rgba(0,0,0,0.35)"
-        accent = "#60A5FA"
-        accent2 = "#A78BFA"
-        kpi_bg = "linear-gradient(135deg, rgba(96,165,250,0.14), rgba(167,139,250,0.10))"
+        bg = "#0B1220"
+        panel = "rgba(15, 23, 42, .60)"
+        text = "#E5E7EB"
+        muted = "#9CA3AF"
+        border = "rgba(148, 163, 184, .18)"
+        card = "rgba(2, 6, 23, .35)"
+        shadow = "0 12px 34px rgba(0,0,0,.22)"
 
-    st.markdown(
-        f"""
-        <style>
-        /* Page background */
-        .stApp {{
-            background: {bg};
-            color: {text};
-        }}
+    css = f"""
+    <style>
+    /* App base */
+    .stApp {{
+        background: {bg};
+        color: {text};
+    }}
 
-        /* Remove top padding a bit */
-        .block-container {{
-            padding-top: 1.15rem;
-            padding-bottom: 2.2rem;
-            max-width: 1350px;
-        }}
+    /* Sidebar */
+    section[data-testid="stSidebar"] {{
+        background: {panel};
+        border-right: 1px solid {border};
+    }}
 
-        /* Sidebar polish */
-        section[data-testid="stSidebar"] {{
-            background: {card2};
-            border-right: 1px solid {border};
-        }}
+    /* Headings */
+    h1, h2, h3, h4 {{
+        color: {text};
+        letter-spacing: -0.02em;
+    }}
+    .muted {{
+        color: {muted} !important;
+    }}
 
-        /* Typography */
-        h1, h2, h3, h4, h5, h6, p, div, span, label {{
-            color: {text};
-        }}
-        .muted {{
-            color: {muted} !important;
-            font-size: 0.92rem;
-        }}
+    /* Make native bordered containers look like cards */
+    div[data-testid="stVerticalBlockBorderWrapper"] {{
+        background: {card};
+        border: 1px solid {border};
+        border-radius: 16px;
+        padding: 18px 18px 14px 18px;
+        box-shadow: {shadow};
+        backdrop-filter: blur(8px);
+    }}
 
-        /* Cards */
-        .card {{
-            background: {card};
-            border: 1px solid {border};
-            border-radius: 18px;
-            padding: 14px 14px 12px 14px;
-            box-shadow: {shadow};
-        }}
-        .card-soft {{
-            background: {card2};
-            border: 1px solid {border};
-            border-radius: 18px;
-            padding: 14px;
-        }}
+    /* Buttons */
+    .stDownloadButton button, .stButton button {{
+        border-radius: 12px !important;
+        border: 1px solid {border} !important;
+    }}
 
-        .kpi {{
-            background: {kpi_bg};
-            border: 1px solid {border};
-            border-radius: 18px;
-            padding: 14px 14px 10px 14px;
-            box-shadow: {shadow};
-        }}
+    /* File uploader dropzone */
+    div[data-testid="stFileUploaderDropzone"] {{
+        border-radius: 14px;
+        border: 1px dashed {border};
+        background: rgba(255,255,255,.03);
+    }}
 
-        .title-row {{
-            display:flex; align-items:center; justify-content:space-between;
-            gap: 10px; margin-bottom: 0.25rem;
-        }}
-        .badge {{
-            display:inline-flex; align-items:center; gap: 6px;
-            padding: 4px 10px;
-            border-radius: 999px;
-            border: 1px solid {border};
-            background: rgba(255,255,255,0.04);
-            color: {muted};
-            font-size: 12px;
-            white-space: nowrap;
-        }}
-
-        /* Buttons */
-        .stButton > button {{
-            border-radius: 14px !important;
-            border: 1px solid {border} !important;
-            padding: 0.6rem 0.85rem !important;
-        }}
-        .stDownloadButton > button {{
-            border-radius: 14px !important;
-            border: 1px solid {border} !important;
-            padding: 0.6rem 0.85rem !important;
-        }}
-
-        /* Inputs */
-        .stTextInput input, .stNumberInput input, .stDateInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] {{
-            border-radius: 14px !important;
-        }}
-
-        /* Plotly card feel */
-        .stPlotlyChart {{
-            background: transparent !important;
-        }}
-
-        /* Subtle accent underline for headers */
-        .accent-line {{
-            height: 3px;
-            width: 72px;
-            background: linear-gradient(90deg, {accent}, {accent2});
-            border-radius: 999px;
-            margin-top: 6px;
-            margin-bottom: 10px;
-        }}
-        /* Card containers (Streamlit bordered containers) */
-div[data-testid="stVerticalBlockBorderWrapper"]{
-    background: {card};
-    border: 1px solid {border};
-    border-radius: 18px;
-    padding: 16px;
-    box-shadow: {shadow};
-}
-section[data-testid="stSidebar"] div[data-testid="stVerticalBlockBorderWrapper"]{
-    background: {card2};
-    border: 1px solid {border};
-    box-shadow: none;
-    padding: 14px;
-}
-
-/* File uploader polish */
-section[data-testid="stFileUploader"] div[data-testid="stFileUploaderDropzone"]{
-    background: rgba(255,255,255,0.04);
-    border: 1px dashed {border} !important;
-    border-radius: 16px !important;
-    padding: 14px !important;
-}
-
-/* Dataframe polish */
-div[data-testid="stDataFrame"]{
-    border-radius: 16px;
-    overflow: hidden;
-    border: 1px solid {border};
-}
-
-/* Text sizing */
-.card-title { margin:0; font-size: 1.15rem; letter-spacing: 0.2px; }
-.kpi-cap { font-size: 0.84rem; color: {muted}; }
-.kpi-val { font-size: 1.35rem; font-weight: 700; margin-top: 6px; }
-
-/* Hide legacy HTML wrappers (they cannot wrap widgets across calls) */
-.card, .card-soft, .title-row { display:none !important; }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
-
+    /* Dataframe */
+    div[data-testid="stDataFrame"] {{
+        border-radius: 12px;
+        overflow: hidden;
+        border: 1px solid {border};
+    }}
+    </style>
+    """
+    st.markdown(css, unsafe_allow_html=True)
 # -------------------------
 # AUTH SYSTEM
 # -------------------------
