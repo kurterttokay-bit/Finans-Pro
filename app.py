@@ -382,9 +382,23 @@ with st.sidebar:
 # LOAD
 # -------------------------
 df = load_data()
+def save_data(df: pd.DataFrame):
+    try:
+        # yalnız canonical kolonları yaz
+        conn.update(worksheet="Sayfa1", data=df[CANON_COLS])
+        st.cache_data.clear()
+        return True, ""
+    except Exception as e:
+        logging.exception(e)
+        return False, str(e)
 usd, eur = get_fx()
 dfx = compute_tl(df, usd, eur)
-
+# ---- Debug (df tanımlandıktan sonra)
+with st.sidebar:
+    with st.expander("🛠️ Google Sheets Debug"):
+        st.write("Okunan satır sayısı:", len(df) if df is not None else 0)
+        st.write("Kolonlar:", list(df.columns) if df is not None and not df.empty else [])
+        st.code(st.session_state.get("_gsheets_last_error", "Yok"))
 # -------------------------
 # DASHBOARD (PRO)
 # -------------------------
