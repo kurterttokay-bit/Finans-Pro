@@ -2,12 +2,13 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import google.generativeai as genai
-from streamlit_gsheets import GSheetsConnection
+from st_gsheets_connection import GSheetsConnection
 from datetime import datetime, timedelta
 from PIL import Image
 import json
 import re
 import logging
+import plotly.express as px
 
 # -------------------------
 # CONFIG
@@ -37,7 +38,7 @@ if "auth" not in st.session_state:
 
 def login():
 
-    col1, col2, col3 = st.columns([1,1.3,1])
+    col1, col2, col3 = st.columns([1, 1.3, 1])
 
     with col2:
 
@@ -76,12 +77,13 @@ GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 genai.configure(api_key=GEMINI_API_KEY)
 
 MODEL_NAME = "gemini-1.5-flash"
+model = genai.GenerativeModel(MODEL_NAME)
 
 # -------------------------
 # GOOGLE SHEETS
 # -------------------------
 
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1gow0J5IA0GaB-BjViSKGbIxoZije0klFGgvDWYHdcNA"
+SHEET_ID = "1gow0J5IA0GaB-BjViSKGbIxoZije0klFGgvDWYHdcNA"
 
 conn = st.connection("gsheets", type=GSheetsConnection)
 
@@ -118,7 +120,6 @@ def get_fx():
 
         return 35.0, 38.0
 
-
 # -------------------------
 # DATA LOAD
 # -------------------------
@@ -128,7 +129,7 @@ def load_data():
 
     try:
 
-        df = conn.read(spreadsheet=SHEET_URL)
+        df = conn.read(spreadsheet=SHEET_ID)
 
         if df.empty:
             return df
@@ -138,12 +139,15 @@ def load_data():
         df["Tutar"] = pd.to_numeric(df["Tutar"], errors="coerce").fillna(0)
 
         if "Vade" in df.columns:
+
             df["Vade_Date"] = pd.to_datetime(
                 df["Vade"],
                 dayfirst=True,
                 errors="coerce"
             )
+
         else:
+
             df["Vade_Date"] = None
 
         return df
@@ -154,14 +158,11 @@ def load_data():
 
         return pd.DataFrame()
 
-
 # -------------------------
 # AI ANALYSIS
 # -------------------------
 
 def analyze_invoice(image):
-
-    model = genai.GenerativeModel(MODEL_NAME)
 
     prompt = """
 Extract invoice information.
@@ -192,6 +193,31 @@ Return ONLY JSON.
     return None
 
 
+def ai_cfo_analysis(df):
+
+    sample = df.head(50).to_dict()
+
+    prompt = f"""
+You are a CFO AI.
+
+Analyze this company's debt table.
+
+{sample}
+
+Explain:
+
+1 cashflow risk
+2 upcoming payment problems
+3 recommendations
+4 liquidity warning
+
+Keep answer short.
+"""
+
+    response = model.generate_content(prompt)
+
+    return response.text
+
 # -------------------------
 # SIDEBAR
 # -------------------------
@@ -215,7 +241,6 @@ with st.sidebar:
     if st.button("Çıkış"):
 
         st.session_state.auth = None
-
         st.rerun()
 
 # -------------------------
@@ -243,7 +268,7 @@ if not df.empty:
 
 if menu == "Dashboard":
 
-    st.title("Finansal Durum")
+    st.title("📊 Finansal Durum")
 
     if df.empty:
 
@@ -274,7 +299,6 @@ if menu == "Dashboard":
         else:
 
             avg_date = today
-
             adat_cost = 0
 
         c1, c2, c3 = st.columns(3)
@@ -294,8 +318,56 @@ if menu == "Dashboard":
             f"{adat_cost:,.2f} ₺"
         )
 
+        st.subheader("📊 Nakit Akış Zaman Çizelgesi")
+
+        cashflow = df[df["Vade_Date"].notnull()].copy()
+
+        flow = cashflow.groupby("Vade_Date")["Tutar_TL"].sum().reset_index()
+
+        flow = flow.sort_values("Vade_Date")
+
+        fig = px.bar(
+            flow,
+            x="Vade_Date",
+            y="Tutar_TL",
+            title="Ödeme Takvimi"
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("⚠️ Yaklaşan Ödemeler")
+
+        risk = cashflow.copy()
+
+        risk["gun"] = (risk["Vade_Date"] - today).dt.days
+
+        kritik = risk[risk["gun"] <= 7]
+
+        if not kritik.empty:
+
+            st.error("7 gün içinde kritik ödeme var!")
+
+            st.dataframe(
+                kritik[["Firma Adı", "Tutar_TL", "Vade_Date"]],
+                use_container_width=True
+            )
+
+        else:
+
+            st.success("Kritik ödeme yok")
+
+        st.subheader("🧠 AI CFO Analizi")
+
+        if st.button("AI Analiz Yap"):
+
+            with st.spinner("AI analiz ediyor..."):
+
+                yorum = ai_cfo_analysis(df)
+
+                st.write(yorum)
+
         st.dataframe(
-            df.drop(columns=["Vade_Date","kur","Tutar_TL"]),
+            df.drop(columns=["Vade_Date", "kur", "Tutar_TL"]),
             use_container_width=True
         )
 
@@ -305,11 +377,11 @@ if menu == "Dashboard":
 
 if menu == "İşlem Merkezi":
 
-    st.title("AI Evrak Analizi")
+    st.title("📄 AI Evrak Analizi")
 
     img = st.file_uploader(
         "Fatura / Çek yükle",
-        type=["png","jpg","jpeg"]
+        type=["png", "jpg", "jpeg"]
     )
 
     if img and st.button("AI Analiz"):
