@@ -7,39 +7,42 @@ import google.generativeai as genai
 from PIL import Image
 import json
 
-# --- 1. AYARLAR VE GÜVENLİK ---
-st.set_page_config(page_title="Finans Pro Kurter Edition", layout="wide", page_icon="🏦")
+# --- 1. AYARLAR VE YETKİLENDİRME ---
+st.set_page_config(page_title="Finans Pro Enterprise", layout="wide", page_icon="🏦")
 
 if 'auth' not in st.session_state: st.session_state.auth = None
-sifreler = {"patron125": "PATRON", "muhasebe007": "MUHASEBE", "kurter": "YONETICI"}
+# Roller ve Şifreler
+sifreler = {
+    "patron125": "PATRON", 
+    "muhasebe007": "MUHASEBE", 
+    "kurter": "YONETICI"
+}
 
 if not st.session_state.auth:
     _, center, _ = st.columns([1, 1.2, 1])
     with center:
-        st.markdown("<h2 style='text-align:center;'>🏦 Finans Sistemi Giriş</h2>", unsafe_allow_html=True)
+        st.markdown("<h2 style='text-align:center;'>🏦 Finans Giriş</h2>", unsafe_allow_html=True)
         with st.form("login"):
             pwd = st.text_input("Şifre", type="password")
             if st.form_submit_button("Sistemi Aç"):
                 if pwd in sifreler:
                     st.session_state.auth = sifreler[pwd]
                     st.rerun()
-                else: st.error("Geçersiz Şifre!")
+                else: st.error("Hatalı!")
     st.stop()
 
-# --- 2. DİNAMİK MODEL SEÇİMİ (Fallback Geliştirildi) ---
+# --- 2. DİNAMİK MODEL VE PARAMETRELER ---
 api_key = st.secrets.get("GEMINI_API_KEY")
-target_model = "models/gemini-1.5-pro" # En güçlü garanti fallback
+target_model = "models/gemini-1.5-pro"
 if api_key:
     genai.configure(api_key=api_key)
     try:
         models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        if any("1.5-flash-latest" in m for m in models):
-            target_model = next(m for m in models if "1.5-flash-latest" in m)
-        elif any("1.5-flash" in m for m in models):
-            target_model = next(m for m in models if "1.5-flash" in m)
+        target_model = next((m for m in models if "1.5-flash-latest" in m), 
+                           next((m for m in models if "1.5-flash" in m), models[0]))
     except: pass
 
-# --- 3. VERİ VE DÖVİZ BAĞLANTISI ---
+# --- 3. VERİ VE DÖVİZ ---
 edit_url = "https://docs.google.com/spreadsheets/d/1gow0J5IA0GaB-BjViSKGbIxoZije0klFGgvDWYHdcNA/edit#gid=0"
 conn = st.connection("gsheets", type=GSheetsConnection)
 
@@ -63,29 +66,31 @@ def load_data():
 df = load_data()
 usd_kur, eur_kur = get_fx_rates()
 
-# --- 4. CSS TASARIMI ---
-st.markdown("""
-    <style>
-    .metric-card { padding: 15px; border-radius: 12px; text-align: center; color: white; border: 1px solid #444; }
-    .manage-box { background: #1E1E1E; border: 1px solid #333; padding: 20px; border-radius: 15px; text-align: center; color: white; }
-    </style>
-""", unsafe_allow_html=True)
-
-menu = st.sidebar.radio("Menü", ["🏠 Dashboard", "📝 Veri Yönetimi"])
-if st.sidebar.button("🔴 Güvenli Çıkış"):
-    st.session_state.auth = None
-    st.rerun()
+# --- 4. SIDEBAR & ROL YÖNETİMİ ---
+with st.sidebar:
+    st.title(f"🏦 Finans Pro")
+    st.success(f"Rol: {st.session_state.auth}")
+    
+    # ROL KISITLAMASI: Muhasebe Dashboard görmesin, Patron sadece Dashboard görsün
+    available_menus = ["🏠 Dashboard", "📝 Veri Yönetimi"]
+    if st.session_state.auth == "MUHASEBE": available_menus = ["📝 Veri Yönetimi"]
+    if st.session_state.auth == "PATRON": available_menus = ["🏠 Dashboard"]
+    
+    menu = st.radio("Menü", available_menus)
+    
+    st.divider()
+    # Dinamik Adat Oranı Girişi
+    adat_orani = st.number_input("Yıllık Adat Oranı (%)", value=39.75, step=0.25) / 100
+    
+    if st.button("🔴 Çıkış"):
+        st.session_state.auth = None
+        st.rerun()
 
 # --- 5. DASHBOARD ---
 if menu == "🏠 Dashboard":
     st.title("⚖️ Finansal Durum Paneli")
     
-    def to_tl(row):
-        if row.get('Döviz') == 'USD': return row['Tutar'] * usd_kur
-        if row.get('Döviz') == 'EUR': return row['Tutar'] * eur_kur
-        return row['Tutar']
-
-    df['Tutar_TL'] = df.apply(to_tl, axis=1)
+    df['Tutar_TL'] = df.apply(lambda r: r['Tutar'] * (usd_kur if r.get('Döviz') == 'USD' else (eur_kur if r.get('Döviz') == 'EUR' else 1)), axis=1)
     total_tl = df['Tutar_TL'].sum()
     bugun = pd.Timestamp(datetime.now().date())
     
@@ -93,109 +98,86 @@ if menu == "🏠 Dashboard":
     if not valid_v.empty:
         gun_farklari = (valid_v['Vade_Date'] - bugun).dt.days
         temp_agirlik = (valid_v['Tutar_TL'] * gun_farklari).sum()
-        ort_gun = int(round(temp_agirlik / total_tl)) if total_tl > 0 else 0
-        ort_vade = bugun + timedelta(days=ort_gun)
-        adat = (temp_agirlik * 0.3975) / 365
+        ort_vade = bugun + timedelta(days=int(round(temp_agirlik / total_tl))) if total_tl > 0 else bugun
+        # Kullanıcıdan gelen dinamik oranla hesaplama
+        adat_yuku = (temp_agirlik * adat_orani) / 365
     else:
-        ort_vade, adat, ort_gun = bugun, 0, 0
+        ort_vade, adat_yuku = bugun, 0
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.markdown(f'<div class="metric-card" style="background:#1b4332;">💰 Toplam Borç<br><b>{total_tl:,.2f} ₺</b></div>', unsafe_allow_html=True)
-    c2.markdown(f'<div class="metric-card" style="background:#003566;">⏳ Ort. Vade<br><b>{ort_vade.strftime("%d.%m.%Y")}</b></div>', unsafe_allow_html=True)
-    c3.markdown(f'<div class="metric-card" style="background:#9d4c00;">⚠️ Adat Yükü<br><b>{adat:,.2f} ₺</b></div>', unsafe_allow_html=True)
-    c4.markdown(f'<div class="metric-card" style="background:#2D2D2D;">💵 $: {usd_kur:.2f} | 💶 €: {eur_kur:.2f}</div>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Toplam Borç", f"{total_tl:,.2f} ₺")
+    c2.metric("Ort. Vade", ort_vade.strftime("%d.%m.%Y"))
+    c3.metric("Adat Yükü", f"{adat_yuku:,.2f} ₺", help=f"Giriş Yapılan Oran: %{adat_orani*100:.2f}")
 
     st.divider()
     st.dataframe(df.drop(columns=['Vade_Date', 'Tutar_TL']), use_container_width=True, hide_index=True)
 
 # --- 6. VERİ YÖNETİMİ ---
 else:
-    st.title("📝 İşlem Merkezi")
+    st.title("📝 Veri İşlem Merkezi")
     
-    k1, k2, k3, k4 = st.columns(4)
-    with k1:
-        st.markdown('<div class="manage-box">📥 Taslak</div>', unsafe_allow_html=True)
-        taslak = pd.DataFrame(columns=["Firma Adı", "Evrak Tipi", "Banka", "Tutar", "Vade", "Döviz"])
-        st.download_button("İndir", taslak.to_csv(index=False).encode('utf-8-sig'), "finans_taslak.csv")
-    
-    with k2:
-        st.markdown('<div class="manage-box">📤 Excel Yükle</div>', unsafe_allow_html=True)
-        up_file = st.file_uploader("Seç", type=["csv","xlsx"], label_visibility="collapsed")
-        if up_file is not None:
+    k1, k2, k3 = st.columns(3)
+    with k1: # GÜVENLİ EXCEL YÜKLEME
+        up_file = st.file_uploader("Dosya Yükle", type=["csv","xlsx"])
+        if up_file:
             if st.button("Tabloya Aktar"):
-                new_data = pd.read_csv(up_file) if up_file.name.endswith('csv') else pd.read_excel(up_file)
-                conn.update(spreadsheet=edit_url, data=pd.concat([df, new_data], ignore_index=True))
-                st.cache_data.clear()
-                st.success("Veriler eklendi!")
-                st.rerun()
+                # Encoding ve hata yakalama ile güvenli okuma
+                try:
+                    if up_file.name.endswith('csv'):
+                        new_data = pd.read_csv(up_file, encoding='utf-8-sig', errors='ignore')
+                    else:
+                        new_data = pd.read_excel(up_file)
+                    conn.update(spreadsheet=edit_url, data=pd.concat([df, new_data], ignore_index=True))
+                    st.cache_data.clear()
+                    st.success("Aktarıldı!")
+                except Exception as e: st.error(f"Dosya okuma hatası: {e}")
 
-    with k3:
-        st.markdown('<div class="manage-box">🌐 E-Tablo</div>', unsafe_allow_html=True)
-        st.link_button("Git", edit_url)
-    
-    with k4:
-        st.markdown('<div class="manage-box">✍️ Manuel</div>', unsafe_allow_html=True)
-        m_ac = st.toggle("Form", value='temp_data' in st.session_state)
+    with k2: st.link_button("🌐 Google Sheets'i Aç", edit_url)
+    with k3: m_ac = st.toggle("✍️ Manuel Giriş / AI Onay")
 
     st.divider()
-
-    # --- GELİŞTİRİLMİŞ AI ANALİZ ---
-    st.subheader("📸 Belge Analizi")
-    up_img = st.file_uploader("Fatura/Çek Görseli", type=["jpg","png","jpeg"])
+    up_img = st.file_uploader("📸 Fatura/Çek Görseli", type=["jpg","png","jpeg"])
     
-    if up_img and st.button("AI İle Tara"):
-        with st.spinner("Belge içeriği çözümleniyor..."):
+    if up_img and st.button("AI İle Analiz Et"):
+        with st.spinner("Analiz ediliyor..."):
             try:
                 model = genai.GenerativeModel(target_model)
                 img = Image.open(up_img).convert("RGB")
-                # Esnetilmiş ve Veri Odaklı Prompt
-                prompt = """Lütfen bu görseldeki finansal verileri (Firma Adı, Tutar, Vade Tarihi, Banka) bul. 
-                Bulduğun sonuçları MUTLAKA aşağıdaki JSON formatında döndür. 
-                Sadece JSON çıktısı ver, açıklama yapma.
-                Format: {"firma": "isim", "tutar": 0.0, "vade": "GG.AA.YYYY", "banka": "isim"}"""
-                
+                prompt = "Respond ONLY with JSON: {'firma': 'str', 'tutar': float, 'vade': 'DD.MM.YYYY', 'banka': 'str'}"
                 resp = model.generate_content([prompt, img])
                 
-                # Akıllı JSON Temizleme
-                raw_text = resp.text.strip()
-                if "```json" in raw_text:
-                    clean_json = raw_text.split("```json")[1].split("```")[0].strip()
-                elif "```" in raw_text:
-                    clean_json = raw_text.split("```")[1].split("```")[0].strip()
-                else:
-                    clean_json = raw_text
-
+                # GELİŞMİŞ AI ÇIKTI KONTROLÜ
                 try:
-                    st.session_state.temp_data = json.loads(clean_json)
-                    st.rerun()
+                    res_text = resp.text
                 except:
-                    st.warning("AI veriyi okudu ama formatlayamadı. Formu sizin için açtım.")
-                    st.session_state.temp_data = {} # Fallback: Formu boş aç
-            except Exception as e: st.error(f"Hata: {e}")
+                    # Alternatif SDK sürümleri için fallback
+                    res_text = resp.candidates[0].content.parts[0].text
+                
+                clean_json = res_text.strip().replace('```json', '').replace('```', '')
+                st.session_state.temp_data = json.loads(clean_json)
+                st.rerun()
+            except Exception as e: st.error(f"AI Okuma Hatası: {e}")
 
     if m_ac or 'temp_data' in st.session_state:
         td = st.session_state.get('temp_data', {})
         with st.form("onay_formu"):
-            f1, f2, f3 = st.columns(3)
-            with f1:
-                v_firma = st.text_input("Firma Adı", value=td.get('firma', ''))
-                v_tip = st.selectbox("Evrak Tipi", ["Fatura", "Çek", "Senet"])
-            with f2:
-                v_tutar = st.number_input("Tutar", value=float(td.get('tutar', 0.0)))
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                v_f = st.text_input("Firma", value=td.get('firma', ''))
+                v_t = st.selectbox("Tür", ["Fatura", "Çek", "Senet"])
+            with col2:
+                v_m = st.number_input("Tutar", value=float(td.get('tutar', 0.0)))
                 try: dv = datetime.strptime(td.get('vade', ''), '%d.%m.%Y')
                 except: dv = datetime.now()
-                v_vade = st.date_input("Vade", value=dv)
-            with f3:
-                v_banka = st.text_input("Banka", value=td.get('banka', ''))
-                v_doviz = st.selectbox("Döviz", ["TL", "USD", "EUR"])
+                v_v = st.date_input("Vade", value=dv)
+            with col3:
+                v_b = st.text_input("Banka", value=td.get('banka', ''))
+                v_d = st.selectbox("Döviz", ["TL", "USD", "EUR"])
             
-            if st.form_submit_button("✅ Onayla ve Gönder"):
-                yeni = pd.DataFrame([{
-                    "Firma Adı": v_firma, "Evrak Tipi": v_tip, "Banka": v_banka,
-                    "Tutar": v_tutar, "Vade": v_vade.strftime('%d.%m.%Y'), "Döviz": v_doviz
-                }])
+            if st.form_submit_button("✅ Kaydet"):
+                yeni = pd.DataFrame([{"Firma Adı": v_f, "Evrak Tipi": v_t, "Banka": v_b, "Tutar": v_m, "Vade": v_v.strftime('%d.%m.%Y'), "Döviz": v_d}])
                 conn.update(spreadsheet=edit_url, data=pd.concat([df, yeni], ignore_index=True))
                 st.cache_data.clear()
                 if 'temp_data' in st.session_state: del st.session_state.temp_data
-                st.success("Kaydedildi!")
+                st.success("Kayıt Başarılı!")
                 st.rerun()
