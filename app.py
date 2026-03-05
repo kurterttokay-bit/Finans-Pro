@@ -7,7 +7,7 @@ import google.generativeai as genai
 from PIL import Image
 import json
 
-# --- 1. AYARLAR VE YETKİLENDİRME ---
+# --- 1. AYARLAR VE GÜVENLİK ---
 st.set_page_config(page_title="Finans Pro Enterprise", layout="wide", page_icon="🏦")
 
 if 'auth' not in st.session_state: st.session_state.auth = None
@@ -26,16 +26,26 @@ if not st.session_state.auth:
                 else: st.error("Hatalı!")
     st.stop()
 
-# --- 2. AI MODEL AYARI ---
-# Secrets'tan anahtarı alıyoruz
+# --- 2. DİNAMİK AI MODEL SEÇİMİ (Çözüm 1 & 3) ---
 api_key = st.secrets.get("GEMINI_API_KEY")
+target_model = "gemini-1.5-flash" # Default fallback
+
 if api_key:
     genai.configure(api_key=api_key)
+    try:
+        # Sistemdeki aktif ve generate destekleyen modelleri tara
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        # Öncelik sırası: flash-latest > flash > pro
+        if any("1.5-flash-latest" in m for m in available_models):
+            target_model = [m for m in available_models if "1.5-flash-latest" in m][0]
+        elif any("1.5-flash" in m for m in available_models):
+            target_model = [m for m in available_models if "1.5-flash" in m][0]
+    except Exception as e:
+        st.sidebar.warning(f"Model listeleme hatası: {e}")
 
-# --- 3. VERİ BAĞLANTISI (TAM YETKİLİ) ---
-# Secrets altındaki [connections.gsheets] bloğunu kullanarak bağlanıyoruz
-conn = st.connection("gsheets", type=GSheetsConnection)
+# --- 3. VERİ BAĞLANTISI (SERVICE ACCOUNT) ---
 edit_url = "https://docs.google.com/spreadsheets/d/1gow0J5IA0GaB-BjViSKGbIxoZije0klFGgvDWYHdcNA/edit#gid=0"
+conn = st.connection("gsheets", type=GSheetsConnection)
 
 @st.cache_data(ttl=60)
 def get_fx_rates():
@@ -43,11 +53,10 @@ def get_fx_rates():
         usd = float(yf.download("USDTRY=X", period="1d", interval="1m", progress=False)['Close'].iloc[-1])
         eur = float(yf.download("EURTRY=X", period="1d", interval="1m", progress=False)['Close'].iloc[-1])
         return usd, eur
-    except: return 34.60, 37.40
+    except: return 34.65, 37.45
 
 def load_data():
     try:
-        # Service Account üzerinden en güncel veriyi çek
         df = conn.read(spreadsheet=edit_url, ttl=0)
         df.columns = df.columns.str.strip()
         df['Tutar'] = pd.to_numeric(df['Tutar'], errors='coerce').fillna(0)
@@ -61,22 +70,16 @@ usd_kur, eur_kur = get_fx_rates()
 # --- 4. SIDEBAR ---
 with st.sidebar:
     st.title("🏦 Finans Pro")
-    st.info(f"Kullanıcı: {st.session_state.auth}")
-    
-    menus = ["🏠 Dashboard", "📝 Veri Yönetimi"]
-    if st.session_state.auth == "MUHASEBE": menus = ["📝 Veri Yönetimi"]
-    if st.session_state.auth == "PATRON": menus = ["🏠 Dashboard"]
-    
-    menu = st.radio("Menü", menus)
+    st.info(f"Yetki: {st.session_state.auth}")
+    menu = st.radio("Menü", ["🏠 Dashboard", "📝 Veri Yönetimi"])
     adat_orani = st.number_input("Adat Oranı (%)", value=39.75) / 100
-    
     if st.button("🔴 Çıkış"):
         st.session_state.auth = None
         st.rerun()
 
 # --- 5. DASHBOARD ---
 if menu == "🏠 Dashboard":
-    st.title("⚖️ Finansal Panel")
+    st.title("⚖️ Finansal Durum")
     df['Tutar_TL'] = df.apply(lambda r: r['Tutar'] * (usd_kur if r.get('Döviz') == 'USD' else (eur_kur if r.get('Döviz') == 'EUR' else 1)), axis=1)
     total_tl = df['Tutar_TL'].sum()
     bugun = pd.Timestamp(datetime.now().date())
@@ -95,29 +98,42 @@ if menu == "🏠 Dashboard":
     c3.metric("Adat Yükü", f"{adat_yuku:,.2f} ₺")
     st.dataframe(df.drop(columns=['Vade_Date', 'Tutar_TL']), use_container_width=True, hide_index=True)
 
-# --- 6. VERİ YÖNETİMİ ---
+# --- 6. VERİ YÖNETİMİ (AI & JSON GÜNCELLEMESİ) ---
 else:
     st.title("📝 İşlem Merkezi")
     
-    up_img = st.file_uploader("📸 Fatura/Çek Analizi", type=["jpg","png","jpeg"])
+    up_img = st.file_uploader("📸 Fatura/Çek Görseli (OCR Destekli)", type=["jpg","png","jpeg"])
+    
     if up_img and st.button("AI İle Analiz Et"):
-        with st.spinner("Okunuyor..."):
+        with st.spinner(f"{target_model} ile analiz ediliyor..."):
             try:
-                # "gemini-1.5-flash" kullanarak daha kararlı okuma sağlıyoruz
-                model = genai.GenerativeModel("gemini-1.5-flash")
+                model = genai.GenerativeModel(target_model)
                 img = Image.open(up_img).convert("RGB")
-                prompt = "Respond ONLY with a valid JSON: {'firma': 'str', 'tutar': float, 'vade': 'DD.MM.YYYY', 'banka': 'str'}"
+                # Çözüm 2: Katı Prompt
+                prompt = "Perform OCR. Respond STRICTLY with valid JSON only. No prose. Format: {'firma': 'str', 'tutar': float, 'vade': 'DD.MM.YYYY', 'banka': 'str'}"
                 resp = model.generate_content([prompt, img])
                 
-                res_text = resp.text.strip().replace('```json', '').replace('```', '')
-                st.session_state.temp_data = json.loads(res_text)
+                # Çözüm 3: Güvenli Yanıt Okuma
+                try:
+                    res_text = resp.text
+                except:
+                    res_text = resp.candidates[0].content.parts[0].text
+                
+                # JSON Temizleme ve Parse (Çözüm 2 Fallback)
+                clean_json = res_text.strip().replace('```json', '').replace('```', '')
+                try:
+                    st.session_state.temp_data = json.loads(clean_json)
+                    st.success("Veriler başarıyla ayrıştırıldı!")
+                except json.JSONDecodeError:
+                    st.warning("Model tam JSON döndüremedi. Ham metinden doldurmayı deneyin:")
+                    st.code(res_text)
                 st.rerun()
-            except:
-                st.error("AI okuyamadı, lütfen bilgileri manuel girin.")
+            except Exception as e:
+                st.error(f"AI Analiz Hatası: {e}")
 
     if 'temp_data' in st.session_state or st.toggle("Manuel Giriş"):
         td = st.session_state.get('temp_data', {})
-        with st.form("kayit_formu"):
+        with st.form("onay_formu"):
             col1, col2 = st.columns(2)
             with col1:
                 v_f = st.text_input("Firma", value=td.get('firma', ''))
@@ -125,18 +141,20 @@ else:
                 v_m = st.number_input("Tutar", value=float(td.get('tutar', 0.0)))
             with col2:
                 v_b = st.text_input("Banka", value=td.get('banka', ''))
-                v_v = st.date_input("Vade")
+                # Vade tarihini güvenli parse etme
+                try: dv = datetime.strptime(td.get('vade', ''), '%d.%m.%Y')
+                except: dv = datetime.now()
+                v_v = st.date_input("Vade", value=dv)
                 v_d = st.selectbox("Döviz", ["TL", "USD", "EUR"])
             
-            # YAZMA İŞLEMİNİ GARANTİYE ALAN BLOK
-            if st.form_submit_button("✅ Kaydet"):
+            if st.form_submit_button("✅ Google Sheets'e Kaydet"):
                 try:
                     yeni_row = pd.DataFrame([{"Firma Adı": v_f, "Evrak Tipi": v_t, "Banka": v_b, "Tutar": v_m, "Vade": v_v.strftime('%d.%m.%Y'), "Döviz": v_d}])
-                    # conn.update kullanarak Service Account yetkisini devreye sokuyoruz
+                    # Service Account Yetkili Yazma
                     conn.update(spreadsheet=edit_url, data=pd.concat([df, yeni_row], ignore_index=True))
                     st.cache_data.clear()
                     if 'temp_data' in st.session_state: del st.session_state.temp_data
-                    st.success("Veri başarıyla Google Sheets'e işlendi!")
+                    st.success("Kayıt Başarılı!")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Kayıt Hatası: {e}. Google Sheets API'yi Cloud üzerinden aktif ettiniz mi?")
+                    st.error(f"Kayıt Hatası: {e}. Lütfen GSheets API'nin aktif olduğunu kontrol edin.")
