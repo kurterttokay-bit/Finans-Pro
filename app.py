@@ -224,12 +224,6 @@ def compute_tl(df: pd.DataFrame, usd: float, eur: float) -> pd.DataFrame:
 # -------------------------
 # OCR / AI INVOICE PARSE
 # -------------------------
-QR_ENABLED = True
-try:
-    from pyzbar.pyzbar import decode as _d
-except Exception:
-    QR_ENABLED = False
-st.caption("QR desteği: " + ("✅ aktif" if QR_ENABLED else "❌ kapalı (pyzbar/zbar yok)"))
 from PIL import ImageOps, ImageEnhance, ImageFilter
 
 def pdf_first_page_to_image(pdf_bytes: bytes, dpi: int = 350) -> Image.Image:
