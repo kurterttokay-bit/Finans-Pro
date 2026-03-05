@@ -272,18 +272,19 @@ def ocr_read(image: Image.Image) -> str:
         return ""
 
 
-def analyze_invoice(image: Image.Image):
-    """
-    Output should be a JSON that we map into Sayfa1 columns.
-    """
-    prompt = """
-Sen bir finans muhasebe asistanısın.
-Bu görsel bir fatura / e-fatura olabilir.
+def analyze_invoice(image: Image.Image, ocr_text: str = "", qr_list: list[str] | None = None):
+    qr_list = qr_list or []
+    prompt = f"""
+Sen bir finans muhasebe asistanısın. Bu görsel bir fatura / e-fatura olabilir.
+
+ELİNDE QR/ OCR varsa bunları mutlaka kullan:
+QR_VERI: {qr_list}
+OCR_METIN: {ocr_text[:4000]}
 
 SADECE JSON döndür. Açıklama ekleme.
 
 Şu şemaya uy:
-{
+{{
   "firma_adi": "",
   "evrak_tipi": "Fatura",
   "tutar": 0,
@@ -291,7 +292,7 @@ SADECE JSON döndür. Açıklama ekleme.
   "aciklama": "",
   "evrak_no": "",
   "doviz": "TL"
-}
+}}
 
 Notlar:
 - vade yoksa fatura tarihini vade olarak yaz.
@@ -299,13 +300,12 @@ Notlar:
 - dövizi bulamazsan TL yaz.
 - evrak_no: fatura no.
 """
+
     try:
         response = model.generate_content([prompt, image])
         text = getattr(response, "text", "") or ""
         if not text and getattr(response, "candidates", None):
             text = response.candidates[0].content.parts[0].text
-
-        # JSON capture
         m = re.search(r"\{.*\}", text, re.S)
         if not m:
             return None
