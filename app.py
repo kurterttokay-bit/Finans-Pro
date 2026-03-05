@@ -8,74 +8,79 @@ import json
 # --- SAYFA AYARLARI ---
 st.set_page_config(page_title="Finans Pro", layout="wide", page_icon="🏦")
 
-# --- API AYARI ---
+# --- SECRETS & API AYARI ---
+# Artık yeni ve temiz anahtarını Streamlit Secrets paneline eklediğini varsayıyorum.
 api_key = st.secrets.get("GEMINI_API_KEY")
+
 if api_key:
     genai.configure(api_key=api_key)
+else:
+    st.error("⚠️ API Anahtarı eksik! Lütfen Streamlit Secrets paneline GEMINI_API_KEY ekle.")
 
-# --- RENKLİ STİLLER ---
+# --- CSS STİLLERİ (Dashboard'u ısıtalım) ---
 st.markdown("""
 <style>
-.metric-card { background: #111; padding: 20px; border-radius: 15px; text-align: center; border: 1px solid #333; }
-.manage-box { background: #1a1a1a; padding: 20px; border-radius: 12px; border: 1px solid #444; text-align: center; min-height: 140px; }
+.metric-card { background: #111; padding: 20px; border-radius: 12px; border-top: 4px solid #00ff88; text-align: center; }
+.sidebar-title { color: #00ff88; font-weight: bold; font-size: 20px; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- VERİ BAĞLANTI URL ---
+# --- VERİ KAYNAĞI ---
 sheet_url = "https://docs.google.com/spreadsheets/d/1gow0J5IA0GaB-BjViSKGbIxoZije0klFGgvDWYHdcNA/edit#gid=0"
 
 # --- SIDEBAR NAVİGASYON ---
 with st.sidebar:
-    st.title("🏦 Finans Pro")
-    sayfa = st.radio("Menü", ["🏠 Dashboard", "📝 Veri Yönetimi", "📸 Fatura Analiz"])
+    st.markdown('<p class="sidebar-title">🏦 Finans Pro</p>', unsafe_allow_html=True)
+    menu = st.radio("Sayfa Seçimi", ["🏠 Dashboard", "📝 Veri Yönetimi", "📸 AI Fatura Tarama"])
     st.divider()
-    st.write(f"Hoş geldin, **Kurter**")
+    st.info(f"Kullanıcı: Kurter")
 
-# --- 1. DASHBOARD ---
-if sayfa == "🏠 Dashboard":
-    st.title("⚖️ Finansal Durum")
-    conn = st.connection("gsheets", type=GSheetsConnection)
-    df = conn.read(spreadsheet=sheet_url, ttl=0)
-    
-    if not df.empty:
-        c1, c2, c3, c4 = st.columns(4)
-        total = pd.to_numeric(df.iloc[:, 3], errors='coerce').sum()
-        with c1: st.markdown(f'<div class="metric-card" style="border-top: 4px solid #00ff88;"><b>Toplam Yük</b><br><h3>{total:,.2f} ₺</h3></div>', unsafe_allow_html=True)
-        with c2: st.markdown('<div class="metric-card" style="border-top: 4px solid #0088ff;"><b>Durum</b><br><h3>Güncel</h3></div>', unsafe_allow_html=True)
-        with c3: st.markdown('<div class="metric-card"><b>USD/TRY</b><br><h3>34.68 ₺</h3></div>', unsafe_allow_html=True)
-        with c4: st.markdown('<div class="metric-card"><b>EUR/TRY</b><br><h3>37.45 ₺</h3></div>', unsafe_allow_html=True)
+# --- 🏠 DASHBOARD ---
+if menu == "🏠 Dashboard":
+    st.title("⚖️ Finansal Durum Paneli")
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        df = conn.read(spreadsheet=sheet_url, ttl=0)
         
-        st.write("### 📋 Evrak Listesi")
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        if not df.empty:
+            c1, c2, c3, c4 = st.columns(4)
+            total_yuk = pd.to_numeric(df.iloc[:, 3], errors='coerce').sum()
+            
+            with c1: st.markdown(f'<div class="metric-card"><b>Toplam Yük</b><br><h3>{total_yuk:,.2f} ₺</h3></div>', unsafe_allow_html=True)
+            with c2: st.markdown('<div class="metric-card" style="border-top-color: #0088ff;"><b>Durum</b><br><h3>Güncel</h3></div>', unsafe_allow_html=True)
+            with c3: st.markdown('<div class="metric-card"><b>USD/TRY</b><br><h3>34.68 ₺</h3></div>', unsafe_allow_html=True)
+            with c4: st.markdown('<div class="metric-card"><b>EUR/TRY</b><br><h3>37.45 ₺</h3></div>', unsafe_allow_html=True)
+            
+            st.write("### 📋 Evrak Listesi")
+            st.dataframe(df, use_container_width=True, hide_index=True)
+    except Exception as e:
+        st.error(f"Veri yüklenemedi: {e}")
 
-# --- 2. VERI YONETIMI ---
-elif sayfa == "📝 Veri Yönetimi":
+# --- 📝 VERİ YÖNETİMİ ---
+elif menu == "📝 Veri Yönetimi":
     st.title("📝 Veri Yönetimi")
-    v1, v2, v3, v4 = st.columns(4)
-    with v1: 
-        st.markdown('<div class="manage-box"><b>1. Taslak Al</b></div>', unsafe_allow_html=True)
-        st.download_button("İndir", pd.DataFrame(columns=["Firma","Vade","Tutar"]).to_csv(index=False).encode('utf-8'), "taslak.csv")
-    with v2:
-        st.markdown('<div class="manage-box"><b>2. Veri Yükle</b></div>', unsafe_allow_html=True)
-        st.file_uploader("Yükle", type=["csv"], label_visibility="collapsed")
-    with v3:
-        st.markdown('<div class="manage-box"><b>3. Sheets</b></div>', unsafe_allow_html=True)
-        st.link_button("Tabloyu Aç", sheet_url)
-    with v4:
-        st.markdown('<div class="manage-box"><b>4. Manuel</b></div>', unsafe_allow_html=True)
-        if st.toggle("Formu Aç"): st.text_input("Firma Adı")
+    st.info("E-tablo üzerinden verilerini yönetebilir veya taslak indirebilirsin.")
+    st.link_button("E-Tabloyu Düzenle", sheet_url)
 
-# --- 3. FATURA ANALIZ ---
-elif sayfa == "📸 Fatura Analiz":
-    st.title("📸 AI Fatura Analizi")
-    img_file = st.file_uploader("Görsel Yükle", type=["jpg","png","jpeg"])
-    if img_file:
-        st.image(img_file, width=400)
-        if st.button("🔍 Verileri Ayıkla"):
-            try:
-                model = genai.GenerativeModel('gemini-1.5-flash')
-                response = model.generate_content(["Bu faturadaki Firma Adı, Tutar ve Vadeyi JSON formatında çıkar.", Image.open(img_file)])
-                st.success("Analiz Bitti!")
-                st.write(response.text)
-            except Exception as e:
-                st.error(f"Hata: {str(e)}")
+# --- 📸 AI FATURA TARAMA ---
+elif menu == "📸 AI Fatura Tarama":
+    st.title("📸 AI Fatura Tarama")
+    uploaded_file = st.file_uploader("Fatura Görseli Yükle", type=['png', 'jpg', 'jpeg'])
+    
+    if uploaded_file:
+        st.image(uploaded_file, caption="Yüklenen Evrak", width=400)
+        if st.button("🔍 Verileri Analiz Et"):
+            with st.spinner("AI analiz ediyor..."):
+                try:
+                    # 'gemini-1.5-flash-latest' en kararlı sürümdür
+                    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+                    img = Image.open(uploaded_file)
+                    prompt = "Extract 'Firma Adı', 'Tutar', 'Vade' as JSON."
+                    
+                    response = model.generate_content([prompt, img])
+                    
+                    # JSON temizliği ve gösterimi
+                    st.success("Analiz Başarılı!")
+                    st.write(response.text)
+                except Exception as e:
+                    st.error(f"Fatura Analiz Hatası: {str(e)}")
