@@ -206,5 +206,3 @@ else:
                 st.text_input("Asıl Borçlu")
                 st.selectbox("Döviz", ["TL", "USD", "EUR"])
             st.form_submit_button("Kaydet")
-
-Kodumuz bu, buna eekler misin
