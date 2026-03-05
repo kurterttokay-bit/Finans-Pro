@@ -27,23 +27,18 @@ if not st.session_state.auth:
     st.stop()
 
 # --- 2. DİNAMİK MODEL SEÇİMİ ---
+# image_4b9489.png'deki anahtarı kullanıyoruz
 api_key = st.secrets.get("GEMINI_API_KEY")
-target_model = "models/gemini-1.5-pro"
+target_model = "gemini-1.5-flash" # Daha hızlı ve kararlı
+
 if api_key:
     genai.configure(api_key=api_key)
-    try:
-        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        target_model = next((m for m in models if "1.5-flash-latest" in m), 
-                           next((m for m in models if "1.5-flash" in m), "models/gemini-1.5-pro"))
-    except: pass
 
-# --- 3. VERİ BAĞLANTISI (SERVICE ACCOUNT MODU) ---
+# --- 3. VERİ BAĞLANTISI ---
 edit_url = "https://docs.google.com/spreadsheets/d/1gow0J5IA0GaB-BjViSKGbIxoZije0klFGgvDWYHdcNA/edit#gid=0"
-
-# DİKKAT: Burada 'connection_name' belirtmiyoruz, Secrets altındaki 'connections.gsheets'i otomatik bulur.
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=60)
 def get_fx_rates():
     try:
         usd = float(yf.download("USDTRY=X", period="1d", interval="1m", progress=False)['Close'].iloc[-1])
@@ -53,30 +48,28 @@ def get_fx_rates():
 
 def load_data():
     try:
-        # Service Account ile okuma yapıyoruz
+        # ttl=0 ile gerçek zamanlı veri çekme
         df = conn.read(spreadsheet=edit_url, ttl=0)
         df.columns = df.columns.str.strip()
         df['Tutar'] = pd.to_numeric(df['Tutar'], errors='coerce').fillna(0)
         df['Vade_Date'] = pd.to_datetime(df['Vade'], dayfirst=True, errors='coerce')
         return df
-    except Exception as e:
-        return pd.DataFrame(columns=["Firma Adı", "Evrak Tipi", "Banka", "Tutar", "Vade", "Döviz"])
+    except: return pd.DataFrame(columns=["Firma Adı", "Evrak Tipi", "Banka", "Tutar", "Vade", "Döviz"])
 
 df = load_data()
 usd_kur, eur_kur = get_fx_rates()
 
-# --- 4. SIDEBAR & PARAMETRELER ---
+# --- 4. SIDEBAR ---
 with st.sidebar:
-    st.title(f"🏦 Finans Pro")
-    st.success(f"Rol: {st.session_state.auth}")
+    st.title("🏦 Finans Pro")
+    st.info(f"Kullanıcı: {st.session_state.auth}")
     
-    available_menus = ["🏠 Dashboard", "📝 Veri Yönetimi"]
-    if st.session_state.auth == "MUHASEBE": available_menus = ["📝 Veri Yönetimi"]
-    if st.session_state.auth == "PATRON": available_menus = ["🏠 Dashboard"]
+    menus = ["🏠 Dashboard", "📝 Veri Yönetimi"]
+    if st.session_state.auth == "MUHASEBE": menus = ["📝 Veri Yönetimi"]
+    if st.session_state.auth == "PATRON": menus = ["🏠 Dashboard"]
     
-    menu = st.radio("Menü", available_menus)
-    st.divider()
-    adat_orani = st.number_input("Yıllık Adat Oranı (%)", value=39.75, step=0.25) / 100
+    menu = st.radio("Menü", menus)
+    adat_orani = st.number_input("Adat Oranı (%)", value=39.75) / 100
     
     if st.button("🔴 Çıkış"):
         st.session_state.auth = None
@@ -84,47 +77,31 @@ with st.sidebar:
 
 # --- 5. DASHBOARD ---
 if menu == "🏠 Dashboard":
-    st.title("⚖️ Finansal Durum Paneli")
+    st.title("⚖️ Finansal Panel")
     df['Tutar_TL'] = df.apply(lambda r: r['Tutar'] * (usd_kur if r.get('Döviz') == 'USD' else (eur_kur if r.get('Döviz') == 'EUR' else 1)), axis=1)
     total_tl = df['Tutar_TL'].sum()
     bugun = pd.Timestamp(datetime.now().date())
     valid_v = df[df['Vade_Date'].notnull()].copy()
+    
     if not valid_v.empty:
         gun_farklari = (valid_v['Vade_Date'] - bugun).dt.days
         temp_agirlik = (valid_v['Tutar_TL'] * gun_farklari).sum()
         ort_vade = bugun + timedelta(days=int(round(temp_agirlik / total_tl))) if total_tl > 0 else bugun
         adat_yuku = (temp_agirlik * adat_orani) / 365
-    else:
-        ort_vade, adat_yuku = bugun, 0
+    else: ort_vade, adat_yuku = bugun, 0
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Toplam Borç", f"{total_tl:,.2f} ₺")
     c2.metric("Ort. Vade", ort_vade.strftime("%d.%m.%Y"))
     c3.metric("Adat Yükü", f"{adat_yuku:,.2f} ₺")
-    st.divider()
     st.dataframe(df.drop(columns=['Vade_Date', 'Tutar_TL']), use_container_width=True, hide_index=True)
 
 # --- 6. VERİ YÖNETİMİ ---
 else:
-    st.title("📝 Veri İşlem Merkezi")
-    k1, k2, k3 = st.columns(3)
-    with k1:
-        up_file = st.file_uploader("Dosya Yükle", type=["csv","xlsx"])
-        if up_file and st.button("Tabloya Aktar"):
-            try:
-                new_data = pd.read_csv(up_file, encoding='utf-8-sig', errors='ignore') if up_file.name.endswith('csv') else pd.read_excel(up_file)
-                conn.update(spreadsheet=edit_url, data=pd.concat([df, new_data], ignore_index=True))
-                st.cache_data.clear()
-                st.success("Aktarıldı!")
-                st.rerun()
-            except Exception as e: st.error(f"Hata: {e}")
-
-    with k2: st.link_button("🌐 Google Sheets'i Aç", edit_url)
-    with k3: m_ac = st.toggle("✍️ Manuel Giriş / AI Onay")
-
-    st.divider()
-    up_img = st.file_uploader("📸 Fatura Analizi", type=["jpg","png","jpeg"])
+    st.title("📝 İşlem Merkezi")
     
+    # AI OKUMA GÜNCELLEMESİ
+    up_img = st.file_uploader("📸 Fatura/Çek Görseli", type=["jpg","png","jpeg"])
     if up_img and st.button("AI İle Analiz Et"):
         with st.spinner("Okunuyor..."):
             try:
@@ -132,36 +109,35 @@ else:
                 img = Image.open(up_img).convert("RGB")
                 prompt = "Respond ONLY JSON: {'firma': 'str', 'tutar': float, 'vade': 'DD.MM.YYYY', 'banka': 'str'}"
                 resp = model.generate_content([prompt, img])
-                try: res_text = resp.text
-                except: res_text = resp.candidates[0].content.parts[0].text
-                st.session_state.temp_data = json.loads(res_text.strip().replace('```json', '').replace('```', ''))
+                # Kararlı JSON yakalama
+                text_content = resp.text if hasattr(resp, 'text') else resp.candidates[0].content.parts[0].text
+                clean_json = text_content.strip().replace('```json', '').replace('```', '')
+                st.session_state.temp_data = json.loads(clean_json)
                 st.rerun()
-            except: st.error("AI okuyamadı.")
+            except Exception as e:
+                st.error("AI şu an okuyamadı, lütfen bilgileri giriniz.")
 
-    if m_ac or 'temp_data' in st.session_state:
+    if 'temp_data' in st.session_state or st.toggle("Manuel Giriş"):
         td = st.session_state.get('temp_data', {})
-        with st.form("onay_formu"):
-            col1, col2, col3 = st.columns(3)
+        with st.form("kayit_formu"):
+            col1, col2 = st.columns(2)
             with col1:
                 v_f = st.text_input("Firma", value=td.get('firma', ''))
                 v_t = st.selectbox("Tür", ["Fatura", "Çek", "Senet"])
-            with col2:
                 v_m = st.number_input("Tutar", value=float(td.get('tutar', 0.0)))
-                try: dv = datetime.strptime(td.get('vade', ''), '%d.%m.%Y')
-                except: dv = datetime.now()
-                v_v = st.date_input("Vade", value=dv)
-            with col3:
+            with col2:
                 v_b = st.text_input("Banka", value=td.get('banka', ''))
+                v_v = st.date_input("Vade")
                 v_d = st.selectbox("Döviz", ["TL", "USD", "EUR"])
             
+            # GARANTİLİ YAZMA BLOĞU
             if st.form_submit_button("✅ Kaydet"):
                 try:
                     yeni_row = pd.DataFrame([{"Firma Adı": v_f, "Evrak Tipi": v_t, "Banka": v_b, "Tutar": v_m, "Vade": v_v.strftime('%d.%m.%Y'), "Döviz": v_d}])
-                    # Kütüphaneyi Service Account ile yazmaya zorluyoruz
                     conn.update(spreadsheet=edit_url, data=pd.concat([df, yeni_row], ignore_index=True))
                     st.cache_data.clear()
                     if 'temp_data' in st.session_state: del st.session_state.temp_data
-                    st.success("Başarıyla Kaydedildi!")
+                    st.success("Tebrikler, e-tabloya işlendi!")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Yazma Hatası: {e}. Google Cloud'da 'Google Sheets API' ve 'Google Drive API' aktif mi?")
+                    st.error(f"Hata: {e}. Google Sheets API'yi açtınız mı?")
