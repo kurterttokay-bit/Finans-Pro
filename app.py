@@ -49,6 +49,28 @@ logging.basicConfig(level=logging.INFO)
 APP_TITLE = "🏦 Finans Enterprise"
 WORKSHEET_NAME = "Sayfa1"  # Google Sheets worksheet
 
+def get_sheets_url() -> str:
+    """Try to find the Google Sheets URL from secrets in multiple common locations."""
+    # 1) Top-level SHEETS_URL
+    try:
+        v = st.secrets.get("SHEETS_URL", "")
+        if v: return str(v)
+    except Exception:
+        pass
+    # 2) connections.gsheets.spreadsheet
+    try:
+        v = st.secrets.get("connections", {}).get("gsheets", {}).get("spreadsheet", "")
+        if v: return str(v)
+    except Exception:
+        pass
+    # 3) connections.gsheets.url (some setups)
+    try:
+        v = st.secrets.get("connections", {}).get("gsheets", {}).get("url", "")
+        if v: return str(v)
+    except Exception:
+        pass
+    return ""
+
 # -------------------------
 # THEME (Light/Dark)
 # -------------------------
@@ -800,23 +822,31 @@ with st.sidebar:
 
     # Theme toggle
     theme_choice = st.radio(
-        "Tema",
-        ["Light", "Dark"],
+        "",
+        ["☀️ Light", "🌙 Dark"],
         horizontal=True,
+        label_visibility="collapsed",
         index=0 if st.session_state.theme_mode == "Light" else 1,
         key="theme_choice_radio",
     )
-    if theme_choice != st.session_state.theme_mode:
-        st.session_state.theme_mode = theme_choice
-        _set_query_params(theme="dark" if theme_choice == "Dark" else "light")
+    theme_choice_clean = "Light" if theme_choice.startswith("☀️") else "Dark"
+    if theme_choice_clean != st.session_state.theme_mode:
+        st.session_state.theme_mode = theme_choice_clean
+        _set_query_params(theme="dark" if theme_choice_clean == "Dark" else "light")
         st.rerun()
+
     inject_theme_css(st.session_state.theme_mode)
 
     with st.container(border=True):
         st.markdown(f"**Kullanıcı:** Kurter  \\n**Yetki:** {ROLE}")
-
-    menu = st.radio("Menü", ["Dashboard", "İşlem Merkezi", "AI Evrak Analizi", "AI CFO Chat"])
-    adat_rate = st.number_input("Adat Faizi %", value=39.75) / 100
+    menu = st.radio(
+        "",
+        ["Dashboard", "İşlem Merkezi", "AI Evrak Analizi", "AI CFO Chat"],
+        label_visibility="collapsed",
+        key="menu_radio",
+    )
+    with st.expander("Ayarlar", expanded=False):
+        adat_rate = st.number_input("Adat Faizi %", value=39.75) / 100
 
     st.divider()
     if st.button("🧹 Cache temizle"):
@@ -1057,27 +1087,6 @@ elif menu == "İşlem Merkezi":
         unsafe_allow_html=True
     )
 
-    # --- KPIs (lightweight, güvenli) ---
-    total_records = int(len(df)) if "df" in globals() and isinstance(df, pd.DataFrame) else 0
-    distinct_firms = 0
-    if "df" in globals() and isinstance(df, pd.DataFrame):
-        for col in ["Firma", "firma", "vendor", "Vendor", "Tedarikçi", "Cari"]:
-            if col in df.columns:
-                distinct_firms = int(df[col].dropna().astype(str).nunique())
-                break
-
-    st.markdown(
-        f"""
-        <div class="kpi-row">
-          <div class="kpi"><div class="label">Toplam kayıt</div><div class="value">{total_records:,}</div></div>
-          <div class="kpi"><div class="label">Benzersiz firma</div><div class="value">{distinct_firms:,}</div></div>
-          <div class="kpi"><div class="label">Akış</div><div class="value">Şablon • Upload • Sheets • Tarama</div></div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    
     # --- Step selector (click -> content below) ---
     step = st.radio(
         "Akış seç",
@@ -1154,12 +1163,12 @@ elif menu == "İşlem Merkezi":
 
         elif step == "3) Sheets’te devam":
             card_header("Google Sheets'te devam et", badge="Live", subtitle="Sheet'i aç, doğrudan oradan düzenle.")
-            sheets_url = st.secrets.get("SHEETS_URL", "")
+            sheets_url = get_sheets_url()
             if sheets_url:
                 st.link_button("🔗 Google Sheets'i aç", sheets_url, use_container_width=True)
                 st.markdown("<div class='muted'>Sheets'te düzenle — Dashboard otomatik yansır.</div>", unsafe_allow_html=True)
             else:
-                st.warning("SHEETS_URL secrets içinde yok. Streamlit → Settings → Secrets → SHEETS_URL")
+                st.warning("Sheets linki secrets içinde bulunamadı. `SHEETS_URL` ya da `connections.gsheets.spreadsheet` tanımlı olmalı.")
 
         else:
             card_header("Tarama → Otomatik Sheets'e ekle", badge="AI + OCR", subtitle="PDF/Foto yükle, AI alanları çıkarıp kaydetsin. Olmazsa manuel gir.")
