@@ -8,3 +8,4 @@ xlsxwriter
 openpyxl
 google-auth
 st-gsheets-connection
+pytesseract
