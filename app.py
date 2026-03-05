@@ -1208,6 +1208,15 @@ elif menu == "İşlem Merkezi":
         ("scan",      "📷  Tara & ekle", "AI+OCR", "PDF/Foto → alan çıkar → Sheets."),
     ]
 
+    # Map internal flow keys to numbered titles used in the panel header/description
+    flow_map = {
+        "template": "1) Şablon indir",
+        "upload": "2) Upload & işle",
+        "sheets": "3) Sheets’te devam",
+        "scan": "4) Tara & ekle",
+    }
+
+
     # Persist selection in session_state (default = upload if user came from elsewhere)
     if "op_flow" not in st.session_state:
         st.session_state.op_flow = "upload"
