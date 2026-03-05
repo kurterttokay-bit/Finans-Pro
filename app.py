@@ -30,20 +30,22 @@ if not st.session_state.auth:
     st.stop()
 
 # --- 2. DİNAMİK AI MODEL SEÇİMİ ---
-api_key = st.secrets.get("GEMINI_API_KEY") #
-target_model = "models/gemini-1.5-flash-latest" 
+api_key = st.secrets.get("GEMINI_API_KEY")
+target_model = "gemini-1.5-flash" # Varsayılan en stabil isim
 
 if api_key:
     genai.configure(api_key=api_key)
     try:
-        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        # 404 hatasını önlemek için tam ismi listeden seç
-        if any("1.5-flash-latest" in m for m in models):
-            target_model = [m for m in models if "1.5-flash-latest" in m][0]
-        elif any("1.5-flash" in m for m in models):
-            target_model = [m for m in models if "1.5-flash" in m][0]
-    except:
-        pass
+        # Mevcut modelleri listele ve en uygununu seç
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # Öncelik sırasına göre kontrol et
+        if any("models/gemini-1.5-flash" in m for m in available_models):
+            target_model = "models/gemini-1.5-flash"
+        elif any("gemini-1.5-flash" in m for m in available_models):
+            target_model = "gemini-1.5-flash"
+    except Exception as e:
+        st.warning(f"Model listesi alınamadı, varsayılan kullanılıyor: {e}")
 
 # --- 3. VERİ BAĞLANTISI (ÖNEMLİ: Secrets'ta Service Account Tanımlı Olmalı) ---
 #
