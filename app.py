@@ -114,50 +114,25 @@ else:
     if up_img and st.button("AI İle Analiz Et"):
         with st.spinner("AI analiz ediyor..."):
             try:
-                model = genai.GenerativeModel('gemini-1.5-flash')
+                # KRİTİK DÜZELTME: Sabit isim yerine yukarıdaki 'target_model' değişkenini kullanıyoruz
+                model = genai.GenerativeModel(target_model) 
+                
                 img = Image.open(up_img).convert("RGB")
                 prompt = "Respond ONLY with JSON: {'firma': 'str', 'tutar': float, 'vade': 'DD.MM.YYYY', 'banka': 'str'}"
+                
+                # API çağrısı
                 resp = model.generate_content([prompt, img])
                 
-                # Model yanıtını güvenli şekilde çek
+                # Yanıtı alma (v1beta/v1 uyumluluğu için)
                 try: 
                     res_text = resp.text
                 except: 
                     res_text = resp.candidates[0].content.parts[0].text
                 
+                # JSON temizleme
                 clean_json = res_text.strip().replace('```json', '').replace('```', '')
                 st.session_state.temp_data = json.loads(clean_json)
-                st.success("Veriler ayrıştırıldı!")
+                st.success(f"Veriler {target_model} ile başarıyla ayrıştırıldı!") # Hangi modelin çalıştığını görelim
                 st.rerun()
             except Exception as e:
-                st.error(f"AI Hatası: {e}")
-
-    if 'temp_data' in st.session_state or st.toggle("Manuel Giriş"):
-        td = st.session_state.get('temp_data', {})
-        with st.form("onay_formu"):
-            col1, col2 = st.columns(2)
-            with col1:
-                v_f = st.text_input("Firma", value=td.get('firma', ''))
-                v_t = st.selectbox("Tür", ["Fatura", "Çek", "Senet"])
-                v_m = st.number_input("Tutar", value=float(td.get('tutar', 0.0)))
-            with col2:
-                v_b = st.text_input("Banka", value=td.get('banka', ''))
-                try: 
-                    dv = datetime.strptime(td.get('vade', ''), '%d.%m.%Y')
-                except: 
-                    dv = datetime.now()
-                v_v = st.date_input("Vade", value=dv)
-                v_d = st.selectbox("Döviz", ["TL", "USD", "EUR"])
-            
-            if st.form_submit_button("✅ Kaydet"):
-                try:
-                    yeni_row = pd.DataFrame([{"Firma Adı": v_f, "Evrak Tipi": v_t, "Banka": v_b, "Tutar": v_m, "Vade": v_v.strftime('%d.%m.%Y'), "Döviz": v_d}])
-                    # YAZMA İŞLEMİ (Service Account yetkisi ile)
-                    conn.update(spreadsheet=edit_url, data=pd.concat([df, yeni_row], ignore_index=True))
-                    st.cache_data.clear()
-                    if 'temp_data' in st.session_state: 
-                        del st.session_state.temp_data
-                    st.success("Başarıyla kaydedildi!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Kayıt Hatası: {e}. Secrets'ta Service Account tanımlı mı?")
+                st.error(f"AI Hatası ({target_model}): {e}") # Hata olursa hangi modelde olduğunu bilelim
