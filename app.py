@@ -3,9 +3,16 @@ import pandas as pd
 from datetime import datetime, timedelta
 from streamlit_gsheets import GSheetsConnection
 import yfinance as yf
+import google.generativeai as genai
+import json
+from PIL import Image
 
 # --- 1. SAYFA AYARLARI ---
 st.set_page_config(page_title="Finans Pro", layout="wide", page_icon="🏦")
+
+# --- GEMINI YAPILANDIRMASI ---
+# Senin API anahtarın buraya eklendi
+genai.configure(api_key="AIzaSyCgKGlkcNNmSdv8HKTm8j4RidpR7lMqYHM")
 
 # --- 2. ÖZEL CSS ---
 st.markdown("""
@@ -59,6 +66,26 @@ def load_data(url, connection):
         return raw_df
     except: return pd.DataFrame()
 
+# --- FATURA ANALİZ FONKSİYONU ---
+def analyze_invoice(image_file):
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    prompt = """
+    Bu faturadaki bilgileri oku ve sadece şu JSON formatında yanıt ver:
+    {
+        "firma_adi": "...",
+        "tutar": 0.0,
+        "vade": "YYYY-MM-DD",
+        "borclu": "..."
+    }
+    Bilgi yoksa boş bırak. Tutar sadece rakam olsun. JSON dışında metin ekleme.
+    """
+    img = Image.open(image_file)
+    response = model.generate_content([prompt, img])
+    try:
+        clean_json = response.text.replace('```json', '').replace('```', '').strip()
+        return json.loads(clean_json)
+    except: return None
+
 # --- 4. VERİ BAĞLANTISI ---
 edit_url = "https://docs.google.com/spreadsheets/d/1gow0J5IA0GaB-BjViSKGbIxoZije0klFGgvDWYHdcNA/edit#gid=0"
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -101,7 +128,6 @@ with st.sidebar:
 # --- 7. DASHBOARD SAYFASI ---
 if menu == "🏠 Dashboard":
     st.title("⚖️ Finans Dashboard")
-    
     filtered_df = df.copy()
     bugun = pd.Timestamp(datetime.now().date())
     f_total_tl, f_ort_vade, f_adat = 0, bugun, 0
@@ -126,7 +152,6 @@ if menu == "🏠 Dashboard":
     kalan_gun = (f_ort_vade - bugun).days
     gun_metni = f"{kalan_gun} Gün Kaldı" if kalan_gun >= 0 else f"{abs(kalan_gun)} Gün Geçti"
 
-    # METRİK KUTULARI
     st.markdown(f"""
         <div class="metric-container">
             <div class="metric-card" style="background:#2E8B57;"><div class="icon">💰</div><div class="title">Toplam Borç</div><div class="value">{f_total_tl:,.2f} ₺</div></div>
@@ -136,13 +161,10 @@ if menu == "🏠 Dashboard":
         </div>
     """, unsafe_allow_html=True)
 
-    # --- BURASI O MEŞHUR ALEVLİ ALERT BAR ---
     if not filtered_df.empty:
         valid_v = filtered_df[filtered_df['Vade_Date'].notnull()].copy()
         valid_v['fark'] = (valid_v['Vade_Date'] - bugun).dt.days
-        # 7 gün ve altı, ama geçmişe gitmeyen (0'dan büyük eşit) vadeleri yakala
         kritik = valid_v[(valid_v['fark'] <= 7) & (valid_v['fark'] >= 0)]
-        
         if not kritik.empty:
             st.markdown(f"""
                 <div class="alert-bar">
@@ -151,7 +173,6 @@ if menu == "🏠 Dashboard":
                     <span style="font-size: 20px;">🔥</span>
                 </div>
             """, unsafe_allow_html=True)
-    # ----------------------------------------
 
     col_main, col_side = st.columns([3, 1])
     with col_main:
@@ -163,62 +184,33 @@ if menu == "🏠 Dashboard":
             safe_k = filtered_df[filtered_df['Vade_Date'].notnull()].copy()
             safe_k['fark'] = (safe_k['Vade_Date'] - bugun).dt.days
             k_df = safe_k[(safe_k['fark'] <= 7) & (safe_k['fark'] >= 0)]
-            if not k_df.empty: 
-                st.dataframe(k_df[["Firma Adı","Tutar"]].sort_values("Tutar", ascending=False), hide_index=True)
+            if not k_df.empty: st.dataframe(k_df[["Firma Adı","Tutar"]].sort_values("Tutar", ascending=False), hide_index=True)
             else: st.info("Vade yok.")
 
-import google.generativeai as genai
-import json
-
-# --- GEMINI YAPILANDIRMASI ---
-# Buraya kendi API anahtarını koymalısın
-genai.configure(api_key="SENIN_GEMINI_API_ANAHTARIN")
-
-# --- FATURA ANALİZ FONKSİYONU ---
-def analyze_invoice(image_file):
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    prompt = """
-    Bu faturadaki bilgileri oku ve sadece şu JSON formatında yanıt ver:
-    {
-        "firma_adi": "...",
-        "tutar": 0.0,
-        "vade": "YYYY-MM-DD",
-        "borclu": "..."
-    }
-    Eğer bilgi yoksa boş bırak. Tutar sadece rakam olsun.
-    """
-    # Resmi Gemini'nin anlayacağı formata çevir
-    img = Image.open(image_file)
-    response = model.generate_content([prompt, img])
-    
-    # JSON verisini ayıkla
-    try:
-        # Metin içindeki JSON kısmını temizle (bazı durumlarda ```json ... ``` ekleyebiliyor)
-        clean_json = response.text.replace('```json', '').replace('```', '').strip()
-        return json.loads(clean_json)
-    except:
-        return None
-
-# --- 8. VERİ YÖNETİMİ SAYFASI (GÜNCELLENMİŞ) ---
-else:
+# --- 8. VERİ YÖNETİMİ SAYFASI ---
+elif menu == "📝 Veri Yönetimi":
     st.title("📝 Veri Yönetimi")
     st.markdown("---")
 
     c1, c2, c3, c4 = st.columns(4)
-    
-    # ... Taslak İndir ve Sheets Git kısımları aynı kalıyor ...
+    with c1:
+        st.markdown('<div class="manage-card"><div class="manage-icon">📥</div><div class="manage-title">Taslak İndir</div><div class="manage-desc">Excel şablonunu al</div></div>', unsafe_allow_html=True)
+        template_csv = pd.DataFrame(columns=["Firma Adı","Evrak Tipi","Banka","Tutar","Vade","Açıklama","Çeki veren","Cirolu","Asıl borçlu","Kime verildi","Evrak No","Döviz","Durum"]).to_csv(index=False).encode('utf-8-sig')
+        st.download_button("Excel İndir", template_csv, "Taslak.csv", "text/csv", use_container_width=True)
 
     with c2:
         st.markdown('<div class="manage-card"><div class="manage-icon">📸</div><div class="manage-title">Fatura Tara</div><div class="manage-desc">Resimden Veri Oku</div></div>', unsafe_allow_html=True)
         uploaded_invoice = st.file_uploader("Fatura Yükle", type=["jpg", "png", "jpeg"], label_visibility="collapsed")
-        
-        # Fatura yüklendiğinde analiz yap
         if uploaded_invoice and 'invoice_data' not in st.session_state:
             with st.spinner("Gemini faturayı inceliyor..."):
                 data = analyze_invoice(uploaded_invoice)
                 if data:
                     st.session_state.invoice_data = data
-                    st.success("Fatura başarıyla okundu! Aşağıdaki form dolduruldu.")
+                    st.success("Fatura başarıyla okundu!")
+
+    with c3:
+        st.markdown('<div class="manage-card"><div class="manage-icon">🌐</div><div class="manage-title">E-Tablo Git</div><div class="manage-desc">Bulut Düzenleme</div></div>', unsafe_allow_html=True)
+        st.link_button("Sheets Aç ↗", edit_url, use_container_width=True)
 
     with c4:
         st.markdown('<div class="manage-card"><div class="manage-icon">✍️</div><div class="manage-title">Manuel Giriş</div><div class="manage-desc">Yeni Kayıt Formu</div></div>', unsafe_allow_html=True)
@@ -226,29 +218,24 @@ else:
 
     if show_form:
         st.divider()
-        # Eğer fatura okunduysa verileri buradan çek, yoksa boş bırak
         inv = st.session_state.get('invoice_data', {})
-        
         with st.form("manual_entry"):
             f1, f2, f3 = st.columns(3)
             with f1:
-                firma = st.text_input("Firma Adı", value=inv.get('firma_adi', ""))
-                tip = st.selectbox("Evrak Tipi", ["Çek", "Senet", "Kredi"])
+                firma_adi = st.text_input("Firma Adı", value=inv.get('firma_adi', ""))
+                evrak_tipi = st.selectbox("Evrak Tipi", ["Çek", "Senet", "Kredi"])
             with f2:
                 tutar = st.number_input("Tutar", min_value=0.0, value=float(inv.get('tutar', 0.0)))
-                # Tarih formatını ayarla
-                default_date = datetime.now()
+                def_date = datetime.now()
                 if inv.get('vade'):
-                    try: default_date = datetime.strptime(inv['vade'], '%Y-%m-%d')
+                    try: def_date = datetime.strptime(inv['vade'], '%Y-%m-%d')
                     except: pass
-                vade = st.date_input("Vade", value=default_date)
+                vade = st.date_input("Vade", value=def_date)
             with f3:
-                borclu = st.text_input("Asıl Borçlu", value=inv.get('borclu', ""))
+                asil_borclu = st.text_input("Asıl Borçlu", value=inv.get('borclu', ""))
                 doviz = st.selectbox("Döviz", ["TL", "USD", "EUR"])
             
             if st.form_submit_button("Kaydet"):
-                # Burada Google Sheets'e kaydetme kodunu çalıştıracaksın
-                st.success(f"{firma} için kayıt başarıyla eklendi!")
-                # Kayıt sonrası veriyi temizle
+                st.success(f"{firma_adi} için kayıt başarıyla eklendi!")
                 if 'invoice_data' in st.session_state:
                     del st.session_state.invoice_data
