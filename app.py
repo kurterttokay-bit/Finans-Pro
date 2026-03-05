@@ -224,6 +224,45 @@ def compute_tl(df: pd.DataFrame, usd: float, eur: float) -> pd.DataFrame:
 # -------------------------
 # OCR / AI INVOICE PARSE
 # -------------------------
+from PIL import ImageOps, ImageEnhance, ImageFilter
+
+def pdf_first_page_to_image(pdf_bytes: bytes, dpi: int = 350) -> Image.Image:
+    # dpi yükselt: 300-400 arası e-fatura için çok fark eder
+    pages = convert_from_bytes(pdf_bytes, dpi=dpi, fmt="png")
+    return pages[0].convert("RGB")
+
+def enhance_for_reading(img: Image.Image) -> Image.Image:
+    # daha net okuma için: grayscale + kontrast + sharp
+    g = ImageOps.grayscale(img)
+    g = ImageEnhance.Contrast(g).enhance(1.8)
+    g = ImageEnhance.Sharpness(g).enhance(2.0)
+    # hafif filtre
+    g = g.filter(ImageFilter.MedianFilter(size=3))
+    return g.convert("RGB")
+
+def decode_qr(img: Image.Image) -> list[str]:
+    # QR decode için pyzbar + opencv
+    try:
+        import cv2
+        import numpy as np
+        from pyzbar.pyzbar import decode as zdecode
+
+        arr = np.array(img.convert("RGB"))
+        bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+
+        # bazen küçük QR için büyütme işe yarar
+        bgr = cv2.resize(bgr, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+
+        codes = zdecode(bgr)
+        out = []
+        for c in codes:
+            try:
+                out.append(c.data.decode("utf-8", errors="ignore"))
+            except Exception:
+                pass
+        return out
+    except Exception:
+        return []
 def ocr_read(image: Image.Image) -> str:
     if not OCR_ENABLED:
         return ""
