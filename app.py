@@ -9,6 +9,7 @@ import re
 import logging
 import plotly.express as px
 import os
+from urllib.parse import urlencode
 from io import BytesIO
 
 # -------------------------
@@ -378,6 +379,88 @@ def inject_theme_css(theme: str):
     }}
     div[data-testid="stRadio"] input:checked + div {{
         border-radius: 12px;
+    }}
+
+
+    /* ---- Flow cards (Islem Merkezi) ---- */
+    .flowcards {{
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 14px;
+        margin-top: 8px;
+        margin-bottom: 12px;
+    }}
+    @media (max-width: 1100px) {{
+        .flowcards {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+    }}
+    @media (max-width: 600px) {{
+        .flowcards {{ grid-template-columns: 1fr; }}
+    }}
+    a.flowcard {{
+        display: block;
+        text-decoration: none;
+        border-radius: 16px;
+        border: 1px solid {border};
+        background: {card};
+        padding: 16px 16px 14px 16px;
+        transition: transform .15s ease, border-color .15s ease, filter .15s ease;
+    }}
+    a.flowcard:hover {{
+        transform: translateY(-1px);
+        filter: brightness(1.02);
+    }}
+    a.flowcard.selected {{
+        border-color: rgba(99, 102, 241, .65);
+        box-shadow: 0 10px 30px rgba(99, 102, 241, .15);
+    }}
+    .flow-top {{
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+        gap: 10px;
+        margin-bottom: 8px;
+    }}
+    .flow-ttl {{
+        font-weight: 800;
+        font-size: 18px;
+        letter-spacing: -0.02em;
+        color: {text};
+        line-height: 1.15;
+    }}
+    .flow-sub {{
+        color: {muted};
+        font-size: 14px;
+        line-height: 1.35;
+    }}
+    .flow-pill {{
+        font-size: 12px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        border: 1px solid {border};
+        color: {muted};
+        background: rgba(255,255,255,.04);
+        white-space: nowrap;
+    }}
+    .flow-ico {{
+        width: 34px;
+        height: 34px;
+        border-radius: 12px;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        border: 1px solid {border};
+        background: rgba(255,255,255,.04);
+        flex: 0 0 auto;
+        font-size: 16px;
+    }}
+
+    /* Panel entrance animation (only the selected flow panel wrapper) */
+    @keyframes fadeUp {{
+        from {{ opacity: 0; transform: translateY(8px); }}
+        to   {{ opacity: 1; transform: translateY(0px); }}
+    }}
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.flow-panel-marker) {{
+        animation: fadeUp .22s ease-out;
     }}
 
 </style>
@@ -813,12 +896,29 @@ def card_header(title: str, badge: str | None = None, subtitle: str | None = Non
         unsafe_allow_html=True
     )
 
+
+def _build_href(**updates) -> str:
+    """Build a relative href keeping existing query params (theme, etc.)."""
+    params = _get_query_params()
+    # flatten possible list values (older API)
+    flat = {}
+    for k, v in params.items():
+        if isinstance(v, (list, tuple)):
+            flat[k] = v[0] if v else ""
+        else:
+            flat[k] = v
+    flat.update({k: v for k, v in updates.items() if v is not None})
+    # drop empties
+    flat = {k: str(v) for k, v in flat.items() if v is not None and str(v) != ""}
+    qs = urlencode(flat)
+    return f"?{qs}" if qs else ""
+
 # -------------------------
 # SIDEBAR (menu + settings)
 # -------------------------
 # -------------------------
 with st.sidebar:
-    st.title("🏦 Finans Panel")
+    st.markdown("### 🏦 Finans")
 
     # Theme toggle
     theme_choice = st.radio(
@@ -838,6 +938,7 @@ with st.sidebar:
     inject_theme_css(st.session_state.theme_mode)
 
     with st.container(border=True):
+        st.markdown("<div class='flow-panel-marker'></div>", unsafe_allow_html=True)
         st.markdown(f"**Kullanıcı:** Kurter  \\n**Yetki:** {ROLE}")
     menu = st.radio(
         "",
@@ -1087,25 +1188,69 @@ elif menu == "İşlem Merkezi":
         unsafe_allow_html=True
     )
 
-    # --- Step selector (click -> content below) ---
-    step = st.radio(
-        "Akış seç",
-        ["1) Şablon indir", "2) Upload & işle", "3) Sheets’te devam", "4) Tara & ekle"],
-        horizontal=True,
-        label_visibility="collapsed",
-        key="op_step",
+    # --- Flow cards selector (click card -> opens panel below) ---
+    flow_map = {
+        "template": "1) Şablon indir",
+        "upload": "2) Upload & işle",
+        "sheets": "3) Sheets’te devam",
+        "scan": "4) Tara & ekle",
+    }
+
+    qp = _get_query_params()
+    flow_q = qp.get("flow")
+    if isinstance(flow_q, (list, tuple)):
+        flow_q = flow_q[0] if flow_q else None
+
+    if "op_flow" not in st.session_state:
+        st.session_state.op_flow = "template"
+
+    if flow_q in flow_map:
+        st.session_state.op_flow = flow_q
+
+    step = flow_map.get(st.session_state.op_flow, "1) Şablon indir")
+
+    # Card definitions (emoji icons keep it dependency-free)
+    cards = [
+        ("template", "📄", "1) Şablon indir", "Excel’i indir, offline doldur.", "Şablon"),
+        ("upload", "⬆️", "2) Upload & işle", "Yükle, önizle, Sheets’e aktar.", "Import"),
+        ("sheets", "🟩", "3) Sheets’te devam", "Doğrudan Google Sheets’te düzenle.", "Live"),
+        ("scan", "📷", "4) Tara & ekle", "PDF/Foto → alan çıkar → Sheets.", "AI+OCR"),
+    ]
+
+    # Ensure theme persists in href
+    theme_param = "dark" if st.session_state.theme_mode == "Dark" else "light"
+
+    st.markdown(
+        "<div class='flowcards'>"
+        + "".join(
+            [
+                f"""<a class='flowcard {'selected' if k==st.session_state.op_flow else ''}' href='{_build_href(theme=theme_param, flow=k)}'>
+                        <div class='flow-top'>
+                          <div style='display:flex;align-items:center;gap:10px'>
+                            <div class='flow-ico'>{ico}</div>
+                            <div class='flow-ttl'>{ttl}</div>
+                          </div>
+                          <div class='flow-pill'>{pill}</div>
+                        </div>
+                        <div class='flow-sub'>{sub}</div>
+                      </a>"""
+                for (k, ico, ttl, sub, pill) in cards
+            ]
+        )
+        + "</div>",
+        unsafe_allow_html=True,
     )
 
-    # Small helper line under the selector
     step_desc = {
         "1) Şablon indir": "Excel şablonunu indir, offline doldur.",
         "2) Upload & işle": "Doldurduğun Excel’i yükle, önizle, Sheets’e aktar.",
         "3) Sheets’te devam": "Google Sheets’i aç, doğrudan orada düzenle.",
         "4) Tara & ekle": "PDF/Foto yükle → alanları çıkar → Sheets’e ekle (olmazsa manuel gir).",
     }
-    st.markdown(f"<div class='muted' style='margin-top:-6px;margin-bottom:14px'>{step_desc.get(step,'')}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='muted' style='margin-top:0px;margin-bottom:12px'>{step_desc.get(step,'')}</div>", unsafe_allow_html=True)
 
     # --- Content area ---
+
     with st.container(border=True):
         if step == "1) Şablon indir":
             card_header("Şablon indir", badge="Şablon", subtitle="Excel’i indir, offline doldur, sonra upload et.")
