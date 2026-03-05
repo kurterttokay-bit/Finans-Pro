@@ -11,5 +11,4 @@ st-gsheets-connection
 pytesseract
 pdf2image
 pytesseract
-pyzbar
 opencv-python-headless
