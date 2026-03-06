@@ -706,6 +706,118 @@ def save_single_record(record: dict):
     except Exception as e:
         logging.exception(e)
         return False, str(e)
+
+def save_many_records(records: list[dict]):
+    """Append many records with a single write, using the same schema as manual save."""
+    try:
+        if not records:
+            return True, ""
+        current = read_sheet(conn, worksheet=WORKSHEET_NAME)
+        if current is None or current.empty:
+            current = pd.DataFrame(columns=SHEET_COLUMNS)
+        clean_records = [{col: rec.get(col, "") for col in SHEET_COLUMNS} for rec in records]
+        updated = pd.concat([current, pd.DataFrame(clean_records)], ignore_index=True)
+        replace_sheet(conn, updated[SHEET_COLUMNS], worksheet=WORKSHEET_NAME)
+        st.cache_data.clear()
+        return True, ""
+    except Exception as e:
+        logging.exception(e)
+        return False, str(e)
+
+# -------------------------
+# FX RATES
+# -------------------------
+@st.cache_data(ttl=300)
+def get_fx():
+    def _safe_rate(ticker: str, fallback: float) -> float:
+        try:
+            fx = yf.download(ticker, period="5d", progress=False, auto_adjust=False)
+            if fx is None or fx.empty or "Close" not in fx.columns:
+                return fallback
+            close = fx["Close"].dropna()
+            if close.empty:
+                return fallback
+            return float(close.iloc[-1])
+        except Exception as e:
+            logging.error("FX rate fetch failed for %s: %s", ticker, e)
+            return fallback
+    usd = _safe_rate("USDTRY=X", 34.90)
+    eur = _safe_rate("EURTRY=X", 37.80)
+    return usd, eur
+def compute_tl(df: pd.DataFrame, usd: float, eur: float) -> pd.DataFrame:
+    dfx = df.copy()
+    kur_map = {
+        "USD": usd, "USDT": usd, "DOLAR": usd, "Dolar": usd, "Dolar ": usd,
+        "EUR": eur, "EURO": eur, "Euro": eur, "Euro ": eur,
+        "TL": 1, "TRY": 1, "₺": 1
+    }
+    dfx["kur"] = dfx["para_birimi"].map(kur_map).fillna(1)
+    dfx["Tutar_TL"] = pd.to_numeric(dfx["genel_toplam"], errors="coerce").fillna(0) * dfx["kur"]
+    return dfx
+# -------------------------
+# OCR / AI INVOICE PARSE
+# -------------------------
+from PIL import ImageOps, ImageEnhance, ImageFilter
+def pdf_first_page_to_image(pdf_bytes: bytes, dpi: int = 350) -> Image.Image:
+    pages = convert_from_bytes(pdf_bytes, dpi=dpi, fmt="png")
+    return pages[0].convert("RGB")
+def enhance_for_reading(img: Image.Image) -> Image.Image:
+    g = ImageOps.grayscale(img)
+    g = ImageEnhance.Contrast(g).enhance(1.8)
+    g = ImageEnhance.Sharpness(g).enhance(2.0)
+    g = g.filter(ImageFilter.MedianFilter(size=3))
+    return g.convert("RGB")
+def decode_qr_opencv(img: Image.Image) -> list[str]:
+    try:
+        import cv2
+        import numpy as np
+        arr = np.array(img.convert("RGB"))
+        bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        bgr = cv2.resize(bgr, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+        detector = cv2.QRCodeDetector()
+        data, points, _ = detector.detectAndDecode(bgr)
+        if data and data.strip():
+            return [data.strip()]
+        return []
+    except Exception:
+        return []
+def ocr_read(image: Image.Image) -> str:
+    if not OCR_ENABLED:
+        return ""
+    try:
+        return pytesseract.image_to_string(image)
+    except Exception:
+        return ""
+def parse_invoice_from_qr(qr_text: str) -> dict | None:
+    if not qr_text:
+        return None
+    try:
+        data = json.loads(qr_text)
+    except Exception:
+        return None
+    kdv_orani = 0.0
+    kdv_tutari = 0.0
+    for key, value in data.items():
+        if isinstance(key, str) and key.startswith("hesaplanankdv("):
+            kdv_tutari = normalize_amount(value)
+        if isinstance(key, str) and key.startswith("kdvmatrah("):
+            try:
+                kdv_orani = normalize_amount(key.split("kdvmatrah(")[1].split(")")[0])
+            except Exception:
+                pass
+    return {
+        "Firma Adı": "",
+        "Evrak Tipi": "Fatura",
+        "Tutar": normalize_amount(data.get("odenecek", data.get("vergidahil", 0))),
+        "Vade": normalize_date(data.get("tarih", "")),
+        "Açıklama": f"QR senaryo: {data.get('senaryo', '')} / tip: {data.get('tip', '')}".strip(" /"),
+        "Evrak No": str(data.get("no", "")).strip(),
+        "Döviz": normalize_currency(data.get("parabirimi", "TL")),
+        "Vergi Kimlik No": str(data.get("avkntckn", "") or data.get("vknckn", "")).strip(),
+        "Ara Toplam": normalize_amount(data.get("malhizmettoplam", 0)),
+        "KDV Oranı": kdv_orani,
+        "KDV Tutarı": kdv_tutari,
+    }
 # -------------------------
 # FX RATES
 # -------------------------
@@ -806,37 +918,122 @@ def merge_invoice_data(primary: dict | None, secondary: dict | None) -> dict:
         if v not in (None, "", 0, 0.0, []):
             merged[k] = v
     return merged
-def process_uploaded_invoice(uploaded_file, do_ocr: bool = False) -> dict:
+def extract_pdf_text(pdf_bytes: bytes) -> str:
+    try:
+        import PyPDF2
+        reader = PyPDF2.PdfReader(BytesIO(pdf_bytes))
+        parts = []
+        for pg in reader.pages[:8]:
+            t = pg.extract_text() or ""
+            if t.strip():
+                parts.append(t)
+        return "\n".join(parts)[:20000]
+    except Exception as e:
+        logging.warning("PDF text extraction failed: %s", e)
+        return ""
+
+def parse_invoice_from_text(text: str) -> dict | None:
+    if not text or not text.strip():
+        return None
+    s = str(text)
+    compact = re.sub(r"[ \t\xa0]+", " ", s).replace("\r", "")
+
+    def m1(patterns):
+        for pat in patterns:
+            m = re.search(pat, compact, re.I | re.S)
+            if m:
+                return m.group(1).strip(" :-\n\t")
+        return ""
+
+    firma = m1([
+        r"(?:UNVAN|SATI[ÇC]I|SATICI|FIRMA|FİRMA)\s*[:\-]?\s*([^\n]{3,120})",
+        r"(?:VKN|VERG[İI]\s*K[İI]ML[İI]K\s*NO)\s*[:\-]?\s*\d{10,11}\s+([^\n]{3,120})",
+    ])
+    if not firma:
+        for line in [ln.strip() for ln in s.splitlines() if ln.strip()]:
+            if len(line) > 6 and not re.search(r"fatura|invoice|sayfa|page|vkn|verg", line, re.I):
+                firma = line[:120]
+                break
+
+    evrak_no = m1([
+        r"(?:FATURA\s*NO|FATURA\s*NUMARASI|BELGE\s*NO|NO)\s*[:\-]?\s*([A-Z0-9\-/]{6,30})",
+        r"\b([A-Z]{2,6}20\d{2}[A-Z0-9\-]{4,24})\b",
+    ])
+    belge_tarihi = m1([
+        r"(?:FATURA\s*TAR[İI]H[İI]|TAR[İI]H)\s*[:\-]?\s*(\d{2}[./-]\d{2}[./-]\d{4})",
+        r"\b(20\d{2}[./-]\d{2}[./-]\d{2})\b",
+    ])
+    vkn = m1([r"(?:VKN|VERG[İI]\s*K[İI]ML[İI]K\s*NO|TCKN)\s*[:\-]?\s*(\d{10,11})"])
+
+    def all_amounts(patterns):
+        vals = []
+        for pat in patterns:
+            for m in re.finditer(pat, compact, re.I | re.S):
+                vals.append(normalize_amount(m.group(1)))
+        return [v for v in vals if v and v > 0]
+
+    genel_vals = all_amounts([r"(?:GENEL\s*TOPLAM|TOPLAM\s*TUTAR|ÖDENECEK\s*TUTAR|ODENECEK\s*TUTAR|VERG[İI]\s*DAH[İI]L)\s*[:\-]?\s*([0-9.,]+)"])
+    ara_vals = all_amounts([r"(?:ARA\s*TOPLAM|MAL\s*H[İI]ZMET\s*TOPLAM|MALH[İI]ZMETTOPLAM|MATRAH)\s*[:\-]?\s*([0-9.,]+)"])
+    kdv_vals = all_amounts([r"(?:HESAPLANAN\s*KDV|KDV\s*TUTARI|TOPLAM\s*KDV)\s*[:\-]?\s*([0-9.,]+)"])
+    kdv_oran = m1([r"KDV\s*(?:ORANI|ORAN)\s*[:\-]?\s*%?\s*(\d{1,2})", r"%\s*(\d{1,2})\s*KDV"])
+
+    para = "TL"
+    if re.search(r"\bUSD\b|\$", compact, re.I):
+        para = "USD"
+    elif re.search(r"\bEUR\b|€", compact, re.I):
+        para = "EUR"
+
+    ara_toplam = ara_vals[0] if ara_vals else 0
+    kdv_tutari = kdv_vals[0] if kdv_vals else 0
+    genel_toplam = genel_vals[0] if genel_vals else 0
+    if not genel_toplam and ara_toplam and kdv_tutari:
+        genel_toplam = ara_toplam + kdv_tutari
+    if not ara_toplam and genel_toplam and kdv_tutari:
+        ara_toplam = max(genel_toplam - kdv_tutari, 0)
+    if not kdv_tutari and ara_toplam and genel_toplam:
+        kdv_tutari = max(genel_toplam - ara_toplam, 0)
+    if not kdv_oran and ara_toplam and kdv_tutari:
+        try:
+            kdv_oran = round((kdv_tutari / ara_toplam) * 100)
+        except Exception:
+            kdv_oran = 0
+
+    result = {
+        "Firma Adı": firma,
+        "Evrak Tipi": "Fatura",
+        "Tutar": genel_toplam,
+        "Vade": normalize_date(belge_tarihi),
+        "Açıklama": "",
+        "Evrak No": evrak_no,
+        "Döviz": normalize_currency(para),
+        "Vergi Kimlik No": vkn,
+        "Ara Toplam": ara_toplam,
+        "KDV Oranı": normalize_amount(kdv_oran or 0),
+        "KDV Tutarı": kdv_tutari,
+        "Durum": "Beklemede",
+    }
+    useful = [result.get("Firma Adı"), result.get("Evrak No"), result.get("Vergi Kimlik No"), result.get("Tutar")]
+    return result if any(v not in ("", 0, 0.0, None) for v in useful) else None
+
+def process_uploaded_invoice_bytes(file_bytes: bytes, source_name: str = "", file_type: str = "", do_ocr: bool = False) -> dict:
     raw_image = None
     image = None
     ocr_text = ""
     qr_list = []
-    source_name = getattr(uploaded_file, "name", "")
     try:
-        file_type = getattr(uploaded_file, "type", "") or ""
-        if file_type == "application/pdf" or source_name.lower().endswith('.pdf'):
-            pdf_bytes = uploaded_file.read()
+        is_pdf = (file_type == "application/pdf") or source_name.lower().endswith(".pdf")
+        if is_pdf:
             if PDF_ENABLED:
                 try:
-                    raw_image = pdf_first_page_to_image(pdf_bytes, dpi=350)
+                    raw_image = pdf_first_page_to_image(file_bytes, dpi=350)
                 except Exception as e:
                     logging.warning("PDF first page image failed for %s: %s", source_name, e)
-            if raw_image is None:
-                try:
-                    import PyPDF2
-                    reader = PyPDF2.PdfReader(BytesIO(pdf_bytes))
-                    extracted = []
-                    for pg in reader.pages[:5]:
-                        t = pg.extract_text() or ""
-                        if t.strip():
-                            extracted.append(t)
-                    ocr_text = "\n".join(extracted)[:12000]
-                except Exception as e:
-                    logging.warning("PDF text extraction failed for %s: %s", source_name, e)
+            ocr_text = extract_pdf_text(file_bytes)
         else:
-            uploaded_file.seek(0)
-            raw_image = Image.open(uploaded_file).convert("RGB")
+            raw_image = Image.open(BytesIO(file_bytes)).convert("RGB")
+
         qr_result = None
+        text_result = None
         if raw_image is not None:
             image = enhance_for_reading(raw_image)
             qr_list = decode_qr_opencv(raw_image) or decode_qr_opencv(image) or []
@@ -847,17 +1044,23 @@ def process_uploaded_invoice(uploaded_file, do_ocr: bool = False) -> dict:
                         ocr_text = (ocr_text + "\n" + ocr_piece).strip()
                 except Exception as e:
                     logging.warning("OCR failed for %s: %s", source_name, e)
+
+        if ocr_text.strip():
+            text_result = parse_invoice_from_text(ocr_text)
+
         if qr_list:
             for qr in qr_list:
                 qr_result = parse_invoice_from_qr(qr)
                 if qr_result:
                     break
+
         ai_result = None
         if image is not None:
             ai_result = analyze_invoice(image, ocr_text=ocr_text, qr_list=qr_list)
         elif ocr_text.strip():
             ai_result = analyze_invoice_text_only(ocr_text, qr_list=qr_list)
-        result = merge_invoice_data(ai_result, qr_result) if (ai_result or qr_result) else None
+
+        result = merge_invoice_data(ai_result, merge_invoice_data(text_result, qr_result)) if (ai_result or text_result or qr_result) else None
         return {
             "source_name": source_name,
             "raw_image": raw_image,
@@ -878,6 +1081,20 @@ def process_uploaded_invoice(uploaded_file, do_ocr: bool = False) -> dict:
             "result": None,
             "error": str(e),
         }
+
+def process_uploaded_invoice(uploaded_file, do_ocr: bool = False) -> dict:
+    source_name = getattr(uploaded_file, "name", "")
+    file_type = getattr(uploaded_file, "type", "") or ""
+    try:
+        file_bytes = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
+    except Exception:
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+        file_bytes = uploaded_file.read()
+    return process_uploaded_invoice_bytes(file_bytes, source_name=source_name, file_type=file_type, do_ocr=do_ocr)
+
 def analyze_invoice(image: Image.Image, ocr_text: str = "", qr_list: list[str] | None = None):
     qr_list = qr_list or []
     prompt = f"""
@@ -1146,30 +1363,48 @@ def render_scan_center(section_key: str = "scan", title: str = "Tarama → Otoma
                 st.caption(f"Seçilen dosya: {len(bulk_files)}")
             if bulk_files and st.button("📦 Toplu tara ve kaydet", use_container_width=True, key=f"{section_key}_bulk_run"):
                 rows = []
-                success_count = 0
-                fail_count = 0
+                prepared_records = []
+                prepared_payloads = []
                 progress = st.progress(0)
+                total_files = max(len(bulk_files), 1)
                 for i, uf in enumerate(bulk_files, start=1):
-                    payload = process_uploaded_invoice(uf, do_ocr=bulk_ocr)
+                    try:
+                        file_bytes = uf.getvalue() if hasattr(uf, "getvalue") else uf.read()
+                    except Exception:
+                        try:
+                            uf.seek(0)
+                        except Exception:
+                            pass
+                        file_bytes = uf.read()
+                    payload = process_uploaded_invoice_bytes(file_bytes, source_name=getattr(uf, "name", ""), file_type=getattr(uf, "type", "") or "", do_ocr=bulk_ocr)
                     result = payload.get("result")
                     if result:
                         row = build_invoice_record(result, ocr_text=payload.get("ocr_text", ""), source_name=payload.get("source_name", ""))
-                        ok, err = save_single_record(row)
-                        if ok:
-                            success_count += 1
-                            if bulk_archive and payload.get("image") is not None:
-                                try:
-                                    archive_invoice(payload.get("image"))
-                                except Exception:
-                                    pass
-                            rows.append({"dosya": payload.get("source_name", ""), "durum": "Kaydedildi", "firma": row.get("firma_adi", ""), "tutar": row.get("genel_toplam", 0), "tarih": row.get("belge_tarihi", ""), "mesaj": ""})
-                        else:
-                            fail_count += 1
-                            rows.append({"dosya": payload.get("source_name", ""), "durum": "Kaydedilemedi", "firma": "", "tutar": "", "tarih": "", "mesaj": err})
+                        prepared_records.append(row)
+                        prepared_payloads.append(payload)
+                        rows.append({"dosya": payload.get("source_name", ""), "durum": "Hazır", "firma": row.get("firma_adi", ""), "tutar": row.get("genel_toplam", 0), "tarih": row.get("belge_tarihi", ""), "mesaj": ""})
                     else:
-                        fail_count += 1
                         rows.append({"dosya": payload.get("source_name", ""), "durum": "Çözümlenemedi", "firma": "", "tutar": "", "tarih": "", "mesaj": payload.get("error", "Veri çıkarılamadı")})
-                    progress.progress(i / max(len(bulk_files), 1))
+                    progress.progress(i / total_files)
+                ok, err = save_many_records(prepared_records) if prepared_records else (True, "")
+                success_count = len(prepared_records) if ok else 0
+                fail_count = len(bulk_files) - success_count
+                if ok and bulk_archive:
+                    for payload in prepared_payloads:
+                        if payload.get("image") is not None:
+                            try:
+                                archive_invoice(payload.get("image"))
+                            except Exception:
+                                pass
+                if ok:
+                    for r in rows:
+                        if r.get("durum") == "Hazır":
+                            r["durum"] = "Kaydedildi"
+                else:
+                    for r in rows:
+                        if r.get("durum") == "Hazır":
+                            r["durum"] = "Kaydedilemedi"
+                            r["mesaj"] = err
                 st.success(f"Toplu işlem bitti. Başarılı: {success_count} · Hatalı: {fail_count}")
                 if rows:
                     st.dataframe(pd.DataFrame(rows), use_container_width=True, height=320)
