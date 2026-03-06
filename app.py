@@ -663,6 +663,80 @@ def build_invoice_record(parsed: dict | None, ocr_text: str = "", source_name: s
         "updated_at": now_str,
     }
 
+
+def render_invoice_review_form(result: dict, key_prefix: str = "rev") -> dict:
+    """Render editable invoice form and return normalized dict in legacy field names.
+    This keeps build_invoice_record compatible while letting user correct all important fields.
+    """
+    result = result or {}
+
+    belge_tarihi_default = result.get("Vade", result.get("belge_tarihi", datetime.now().strftime("%d.%m.%Y")))
+    firma_default = result.get("Firma Adı", result.get("firma_adi", ""))
+    evrak_tipi_default = result.get("Evrak Tipi", result.get("evrak_tipi", "Fatura")) or "Fatura"
+    evrak_no_default = result.get("Evrak No", result.get("evrak_no", ""))
+    vergi_default = result.get("Vergi Kimlik No", result.get("vergi_kimlik_no", ""))
+    para_default = normalize_currency(result.get("Döviz", result.get("para_birimi", "TL")))
+    ara_default = normalize_amount(result.get("Ara Toplam", result.get("ara_toplam", 0)))
+    kdv_oran_default = normalize_amount(result.get("KDV Oranı", result.get("kdv_orani", 0)))
+    kdv_tutar_default = normalize_amount(result.get("KDV Tutarı", result.get("kdv_tutari", 0)))
+    genel_default = normalize_amount(result.get("Tutar", result.get("genel_toplam", 0)))
+    kategori_default = result.get("Kategori", result.get("kategori", ""))
+    durum_default = result.get("Durum", result.get("odeme_durumu", "Beklemede")) or "Beklemede"
+    aciklama_default = result.get("Açıklama", result.get("aciklama", ""))
+
+    tip_options = ["Fatura", "e-Fatura", "e-Arşiv", "Gider Pusulası", "Diğer"]
+    if evrak_tipi_default not in tip_options:
+        tip_options.append(evrak_tipi_default)
+    para_options = ["TL", "USD", "EUR"]
+    if para_default not in para_options:
+        para_options.append(para_default)
+    durum_options = ["Beklemede", "Ödendi"]
+    if durum_default not in durum_options:
+        durum_options.append(durum_default)
+    kategori_options = ["", "Ofis Gideri", "Yazılım", "Kargo", "Reklam", "Yemek", "Demirbaş", "Diğer"]
+    if kategori_default and kategori_default not in kategori_options:
+        kategori_options.append(kategori_default)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        firma_adi = st.text_input("Firma Adı", value=firma_default, key=f"{key_prefix}_firma")
+        evrak_tipi = st.selectbox("Evrak Tipi", tip_options, index=tip_options.index(evrak_tipi_default), key=f"{key_prefix}_tip")
+        evrak_no = st.text_input("Evrak No", value=evrak_no_default, key=f"{key_prefix}_no")
+    with c2:
+        belge_tarihi = st.text_input("Belge Tarihi", value=belge_tarihi_default, key=f"{key_prefix}_tarih")
+        para_birimi = st.selectbox("Para Birimi", para_options, index=para_options.index(para_default), key=f"{key_prefix}_para")
+        genel_toplam = st.number_input("Genel Toplam", value=float(genel_default), step=100.0, key=f"{key_prefix}_genel")
+    with c3:
+        vergi_kimlik_no = st.text_input("Vergi Kimlik No", value=vergi_default, key=f"{key_prefix}_vkn")
+        kategori = st.selectbox("Kategori", kategori_options, index=kategori_options.index(kategori_default), key=f"{key_prefix}_kategori")
+        odeme_durumu = st.selectbox("Ödeme Durumu", durum_options, index=durum_options.index(durum_default), key=f"{key_prefix}_durum")
+
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        ara_toplam = st.number_input("Ara Toplam", value=float(ara_default), step=100.0, key=f"{key_prefix}_ara")
+    with d2:
+        kdv_orani = st.number_input("KDV Oranı", value=float(kdv_oran_default), step=1.0, key=f"{key_prefix}_kdv_oran")
+    with d3:
+        kdv_tutari = st.number_input("KDV Tutarı", value=float(kdv_tutar_default), step=10.0, key=f"{key_prefix}_kdv_tutar")
+
+    aciklama = st.text_area("Açıklama", value=aciklama_default, key=f"{key_prefix}_aciklama")
+
+    return {
+        "Firma Adı": firma_adi,
+        "Evrak Tipi": evrak_tipi,
+        "Evrak No": evrak_no,
+        "Vergi Kimlik No": vergi_kimlik_no,
+        "Döviz": para_birimi,
+        "Ara Toplam": ara_toplam,
+        "KDV Oranı": kdv_orani,
+        "KDV Tutarı": kdv_tutari,
+        "Tutar": genel_toplam,
+        "Vade": belge_tarihi,
+        "Kategori": kategori,
+        "Durum": odeme_durumu,
+        "Açıklama": aciklama,
+    }
+
 # -------------------------
 # DATA LOAD / SAVE
 # -------------------------
@@ -1093,11 +1167,11 @@ if menu == "Dashboard":
         amt_col = "Tutar_TL"
         suffix = "₺"
     else:
-        amt_col = "Tutar"
+        amt_col = "genel_toplam"
         suffix = ""
 
     valid = data[data["Belge_Date"].notnull()].copy()
-    valid["days_to_due"] = (valid["Vade_Date"] - today).dt.days
+    valid["days_to_due"] = (valid["Belge_Date"] - today).dt.days
 
     total = float(valid[amt_col].sum()) if not valid.empty else 0.0
     overdue = float(valid.loc[valid["days_to_due"] < 0, amt_col].sum()) if not valid.empty else 0.0
@@ -1177,7 +1251,7 @@ if menu == "Dashboard":
             proj = compute_tl(valid, usd, eur)
             proj = proj[proj["Belge_Date"].notnull()].copy()
             proj = proj.groupby("Belge_Date")["Tutar_TL"].sum().reset_index()
-            proj = proj.sort_values("Vade_Date")
+            proj = proj.sort_values("Belge_Date")
 
             end = today + timedelta(days=90)
             days = pd.date_range(today, end, freq="D")
@@ -1457,7 +1531,7 @@ elif menu == "İşlem Merkezi":
                     # Görsel yok (PDF->image yok) ama metin varsa, metinle dene
                     if ocr_text.strip():
                         with st.spinner("AI (metin) alanları çıkarıyor..."):
-                            result = analyze_invoice_text_only(ocr_text)
+                            result = analyze_invoice_text_only(ocr_text, qr_list=[])
                         if result:
                             st.success("✅ Alanlar çıkarıldı. Kaydetmeden önce gözden geçir.")
                             st.session_state["_scan_result"] = result
@@ -1473,22 +1547,11 @@ elif menu == "İşlem Merkezi":
             image = st.session_state.get("_scan_image")
             if result:
                 st.divider()
-                st.markdown("<div class='muted'>Hızlı düzeltme:</div>", unsafe_allow_html=True)
-
-                e1, e2 = st.columns(2)
-                with e1:
-                    result["Firma Adı"] = st.text_input("Firma Adı", value=result.get("Firma Adı", ""), key="sr_firma")
-                    result["Evrak Tipi"] = st.selectbox("Evrak Tipi", ["Fatura", "Çek", "Senet", "Diğer"], index=0, key="sr_tip")
-                    result["Döviz"] = st.text_input("Döviz", value=result.get("Döviz", "TL"), key="sr_doviz")
-                    result["Durum"] = st.selectbox("Durum", ["Beklemede", "Ödendi", "Takas"], index=0, key="sr_durum")
-                with e2:
-                    result["Tutar"] = st.number_input("Tutar", value=float(result.get("Tutar", 0.0)), step=100.0, key="sr_tutar")
-                    result["Vade"] = st.text_input("Vade (DD.MM.YYYY)", value=result.get("Vade", datetime.now().strftime("%d.%m.%Y")), key="sr_vade")
-                    result["Evrak No"] = st.text_input("Evrak No", value=result.get("Evrak No", ""), key="sr_no")
-                    result["Açıklama"] = st.text_input("Açıklama", value=result.get("Açıklama", ""), key="sr_ack")
+                st.markdown("<div class='muted'>Kaydetmeden önce bilgileri kontrol et:</div>", unsafe_allow_html=True)
+                edited_result = render_invoice_review_form(result, key_prefix="scan_review")
 
                 if st.button("💾 Sheets'e kaydet", use_container_width=True, key="btn_scan_save"):
-                    new_row = build_invoice_record(result, ocr_text=ocr_text, source_name=getattr(scan_file, "name", ""))
+                    new_row = build_invoice_record(edited_result, ocr_text=ocr_text, source_name=getattr(scan_file, "name", ""))
                     df2 = df.copy().drop(columns=["Belge_Date"], errors="ignore")
                     df2 = pd.concat([df2, pd.DataFrame([new_row])], ignore_index=True)
                     df2 = normalize_sheet(df2)
@@ -1633,24 +1696,12 @@ elif menu == "AI Evrak Analizi":
         st.json(result)
 
         st.subheader("✍️ Kaydetmeden önce düzelt")
-        e1, e2, e3 = st.columns(3)
-        with e1:
-            result["Firma Adı"] = st.text_input("Firma Adı", value=result.get("Firma Adı", ""))
-            result["Evrak Tipi"] = st.selectbox("Evrak Tipi", ["Fatura", "e-Fatura", "e-Arşiv", "Diğer"], index=0)
-            result["Evrak No"] = st.text_input("Evrak No", value=result.get("Evrak No", ""))
-        with e2:
-            result["Tutar"] = st.number_input("Genel Toplam", value=float(result.get("Tutar", 0.0)), step=100.0)
-            result["Vade"] = st.text_input("Belge Tarihi", value=result.get("Vade", datetime.now().strftime("%d.%m.%Y")))
-            result["Döviz"] = st.text_input("Para Birimi", value=result.get("Döviz", "TL"))
-        with e3:
-            result["Vergi Kimlik No"] = st.text_input("Vergi Kimlik No", value=result.get("Vergi Kimlik No", ""))
-            result["Kategori"] = st.text_input("Kategori", value=result.get("Kategori", ""))
-            result["Açıklama"] = st.text_input("Açıklama", value=result.get("Açıklama", ""))
-            result["Durum"] = st.selectbox("Ödeme Durumu", ["Beklemede", "Ödendi"], index=0)
+        edited_result = render_invoice_review_form(result, key_prefix="detail_review")
 
         if st.button("💾 Google Sheets'e Kaydet", use_container_width=True):
+            new_row = build_invoice_record(edited_result, ocr_text=ocr_text, source_name=getattr(uploaded, "name", ""))
             df2 = df.copy().drop(columns=["Belge_Date"], errors="ignore")
-            df2 = pd.concat([df2, pd.DataFrame([result])], ignore_index=True)
+            df2 = pd.concat([df2, pd.DataFrame([new_row])], ignore_index=True)
             df2 = normalize_sheet(df2)
 
             ok, err = save_data(df2)
