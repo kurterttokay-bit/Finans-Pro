@@ -743,11 +743,11 @@ Notlar:
         if not text and getattr(response, "candidates", None):
             text = response.candidates[0].content.parts[0].text
 
-        m = re.search(r"\{.*\}", text, re.S)
-        if not m:
+        from json_utils import safe_json_loads
+        
+        data = safe_json_loads(text)
+        if not data:
             return None
-        data = json.loads(m.group())
-
         firma = str(data.get("firma_adi", "")).strip()
         evrak_tipi = str(data.get("evrak_tipi", "Fatura")).strip() or "Fatura"
         doviz = str(data.get("doviz", "TL")).strip() or "TL"
