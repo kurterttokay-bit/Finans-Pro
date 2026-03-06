@@ -597,7 +597,7 @@ if GSheetsConnection is None:
     st.error("GSheetsConnection kütüphanesi bulunamadı. requirements.txt kontrol edin.")
     st.stop()
 
-conn = st.connection("gsheets", type=GSheetsConnection)
+df = read_sheet(conn)
 
 # -------------------------
 # COLUMN NORMALIZATION (Sayfa1)
