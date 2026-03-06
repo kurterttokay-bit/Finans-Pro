@@ -602,14 +602,16 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 # COLUMN NORMALIZATION (Sayfa1)
 # -------------------------
 CANON_COLS = [
-    "Firma Adı", "Evrak Tipi", "Banka", "Tutar", "Vade", "Açıklama", "Çeki veren",
-    "Cirolu", "Asıl borçlu", "Kime verildi", "Evrak No", "Döviz", "Durum"
+    "kayit_tarihi", "belge_tarihi", "firma_adi", "evrak_tipi", "evrak_no",
+    "vergi_kimlik_no", "para_birimi", "ara_toplam", "kdv_orani", "kdv_tutari",
+    "genel_toplam", "kategori", "odeme_durumu", "aciklama", "ham_metin",
+    "kaynak_dosya", "created_at", "updated_at"
 ]
 
 def normalize_sheet(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         out = pd.DataFrame(columns=CANON_COLS)
-        out["Vade_Date"] = pd.NaT
+        out["Belge_Date"] = pd.NaT
         return out
 
     df = df.copy()
@@ -621,12 +623,45 @@ def normalize_sheet(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df[CANON_COLS].copy()
 
-    df["Tutar"] = pd.to_numeric(df["Tutar"], errors="coerce").fillna(0)
-    df["Vade_Date"] = pd.to_datetime(df["Vade"], dayfirst=True, errors="coerce")
+    for col in ["ara_toplam", "kdv_orani", "kdv_tutari", "genel_toplam"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
-    df["Döviz"] = df["Döviz"].astype(str).str.strip().replace({"": "TL"}).fillna("TL")
-    df["Durum"] = df["Durum"].astype(str).str.strip().replace({"": "Beklemede"}).fillna("Beklemede")
+    df["Belge_Date"] = pd.to_datetime(df["belge_tarihi"], dayfirst=True, errors="coerce")
+    df["para_birimi"] = df["para_birimi"].astype(str).str.strip().replace({"": "TL"}).fillna("TL")
+    df["odeme_durumu"] = df["odeme_durumu"].astype(str).str.strip().replace({"": "Beklemede"}).fillna("Beklemede")
     return df
+
+
+def build_invoice_record(parsed: dict | None, ocr_text: str = "", source_name: str = "") -> dict:
+    parsed = parsed or {}
+    now = datetime.now()
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    today_str = now.strftime("%d.%m.%Y")
+
+    belge_tarihi = normalize_date(parsed.get("Vade", parsed.get("belge_tarihi", "")))
+    genel_toplam = normalize_amount(parsed.get("Tutar", parsed.get("genel_toplam", 0)))
+    para_birimi = normalize_currency(parsed.get("Döviz", parsed.get("para_birimi", "TL")))
+
+    return {
+        "kayit_tarihi": today_str,
+        "belge_tarihi": belge_tarihi,
+        "firma_adi": str(parsed.get("Firma Adı", parsed.get("firma_adi", ""))).strip(),
+        "evrak_tipi": str(parsed.get("Evrak Tipi", parsed.get("evrak_tipi", "Fatura"))).strip() or "Fatura",
+        "evrak_no": str(parsed.get("Evrak No", parsed.get("evrak_no", ""))).strip(),
+        "vergi_kimlik_no": str(parsed.get("Vergi Kimlik No", parsed.get("vergi_kimlik_no", ""))).strip(),
+        "para_birimi": para_birimi,
+        "ara_toplam": normalize_amount(parsed.get("Ara Toplam", parsed.get("ara_toplam", 0))),
+        "kdv_orani": normalize_amount(parsed.get("KDV Oranı", parsed.get("kdv_orani", 0))),
+        "kdv_tutari": normalize_amount(parsed.get("KDV Tutarı", parsed.get("kdv_tutari", 0))),
+        "genel_toplam": genel_toplam,
+        "kategori": str(parsed.get("Kategori", parsed.get("kategori", ""))).strip(),
+        "odeme_durumu": str(parsed.get("Durum", parsed.get("odeme_durumu", "Beklemede"))).strip() or "Beklemede",
+        "aciklama": str(parsed.get("Açıklama", parsed.get("aciklama", ""))).strip(),
+        "ham_metin": (ocr_text or str(parsed.get("ham_metin", ""))).strip(),
+        "kaynak_dosya": source_name,
+        "created_at": now_str,
+        "updated_at": now_str,
+    }
 
 # -------------------------
 # DATA LOAD / SAVE
@@ -691,8 +726,8 @@ def compute_tl(df: pd.DataFrame, usd: float, eur: float) -> pd.DataFrame:
         "EUR": eur, "EURO": eur, "Euro": eur, "Euro ": eur,
         "TL": 1, "TRY": 1, "₺": 1
     }
-    dfx["kur"] = dfx["Döviz"].map(kur_map).fillna(1)
-    dfx["Tutar_TL"] = pd.to_numeric(dfx["Tutar"], errors="coerce").fillna(0) * dfx["kur"]
+    dfx["kur"] = dfx["para_birimi"].map(kur_map).fillna(1)
+    dfx["Tutar_TL"] = pd.to_numeric(dfx["genel_toplam"], errors="coerce").fillna(0) * dfx["kur"]
     return dfx
 
 # -------------------------
@@ -880,9 +915,9 @@ def make_template_xlsx() -> bytes:
             "Notlar": [
                 "Bu dosyayı indirip doldurun.",
                 "Sonra İşlem Merkezi > Excel Upload bölümünden yükleyin.",
-                "Vade formatı: 05.03.2026 (DD.MM.YYYY).",
-                "Döviz: TL / USD / EUR gibi.",
-                "Durum: Beklemede / Ödendi / Takas."
+                "Belge tarihi formatı: 05.03.2026 (DD.MM.YYYY).",
+                "Para birimi: TL / USD / EUR gibi.",
+                "Ödeme durumu: Beklemede / Ödendi."
             ]
         })
         tips.to_excel(writer, index=False, sheet_name="README")
@@ -1035,12 +1070,12 @@ if menu == "Dashboard":
     data = dfx.copy()
 
     if search.strip():
-        data = data[data["Firma Adı"].astype(str).str.contains(search, case=False, na=False)]
+        data = data[data["firma_adi"].astype(str).str.contains(search, case=False, na=False)]
     if only_open != "Hepsi":
-        data = data[data["Durum"].astype(str).str.strip().str.lower() == only_open.lower()]
+        data = data[data["odeme_durumu"].astype(str).str.strip().str.lower() == only_open.lower()]
 
     today = pd.Timestamp(datetime.now().date())
-    data["days_to_due"] = (data["Vade_Date"] - today).dt.days
+    data["days_to_due"] = (data["Belge_Date"] - today).dt.days
 
     d = data["days_to_due"].fillna(10**9)
     if horizon == "Geciken":
@@ -1061,7 +1096,7 @@ if menu == "Dashboard":
         amt_col = "Tutar"
         suffix = ""
 
-    valid = data[data["Vade_Date"].notnull()].copy()
+    valid = data[data["Belge_Date"].notnull()].copy()
     valid["days_to_due"] = (valid["Vade_Date"] - today).dt.days
 
     total = float(valid[amt_col].sum()) if not valid.empty else 0.0
@@ -1096,8 +1131,8 @@ if menu == "Dashboard":
         if valid.empty:
             st.info("Vade tarihi olan kayıt yok.")
         else:
-            pay = valid.groupby("Vade_Date")[amt_col].sum().reset_index()
-            fig = px.bar(pay, x="Vade_Date", y=amt_col)
+            pay = valid.groupby("Belge_Date")[amt_col].sum().reset_index()
+            fig = px.bar(pay, x="Belge_Date", y=amt_col)
             st.plotly_chart(fig, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1128,8 +1163,8 @@ if menu == "Dashboard":
         if valid.empty:
             st.info("Veri yok.")
         else:
-            top = valid.groupby("Firma Adı")[amt_col].sum().sort_values(ascending=False).head(10).reset_index()
-            fig3 = px.bar(top, x="Firma Adı", y=amt_col)
+            top = valid.groupby("firma_adi")[amt_col].sum().sort_values(ascending=False).head(10).reset_index()
+            fig3 = px.bar(top, x="firma_adi", y=amt_col)
             st.plotly_chart(fig3, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1140,15 +1175,15 @@ if menu == "Dashboard":
             st.info("Projeksiyon için vade tarihi olan kayıt yok.")
         else:
             proj = compute_tl(valid, usd, eur)
-            proj = proj[proj["Vade_Date"].notnull()].copy()
-            proj = proj.groupby("Vade_Date")["Tutar_TL"].sum().reset_index()
+            proj = proj[proj["Belge_Date"].notnull()].copy()
+            proj = proj.groupby("Belge_Date")["Tutar_TL"].sum().reset_index()
             proj = proj.sort_values("Vade_Date")
 
             end = today + timedelta(days=90)
             days = pd.date_range(today, end, freq="D")
             timeline = pd.DataFrame({"date": days})
 
-            proj = proj.rename(columns={"Vade_Date": "date", "Tutar_TL": "outflow"})
+            proj = proj.rename(columns={"Belge_Date": "date", "Tutar_TL": "outflow"})
             timeline = timeline.merge(proj, on="date", how="left").fillna({"outflow": 0.0})
             timeline["balance"] = float(base_cash) - timeline["outflow"].cumsum()
 
@@ -1176,7 +1211,7 @@ if menu == "Dashboard":
             st.info("Riskli kalem yok.")
         else:
             risk_table = valid.sort_values("days_to_due").head(15)
-            show_cols = ["Firma Adı", "Evrak Tipi", "Vade", "days_to_due", "Tutar_TL", "Döviz", "Durum", "Evrak No", "Açıklama"]
+            show_cols = ["firma_adi", "evrak_tipi", "belge_tarihi", "days_to_due", "Tutar_TL", "para_birimi", "odeme_durumu", "evrak_no", "aciklama"]
             st.dataframe(risk_table[show_cols], use_container_width=True, height=420)
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1313,16 +1348,16 @@ elif menu == "İşlem Merkezi":
             if up:
                 try:
                     incoming = read_template_xlsx(up)
-                    incoming_view = incoming.drop(columns=["Vade_Date"], errors="ignore")
+                    incoming_view = incoming.drop(columns=["Belge_Date"], errors="ignore")
 
                     st.markdown("<div class='muted'>Önizleme (ilk 20 satır):</div>", unsafe_allow_html=True)
                     st.dataframe(incoming_view.head(20), use_container_width=True, height=260)
 
                     nonblank = incoming.copy()
                     mask_blank = (
-                        nonblank["Firma Adı"].astype(str).str.strip().eq("") &
-                        (pd.to_numeric(nonblank["Tutar"], errors="coerce").fillna(0) == 0) &
-                        nonblank["Vade"].astype(str).str.strip().eq("")
+                        nonblank["firma_adi"].astype(str).str.strip().eq("") &
+                        (pd.to_numeric(nonblank["genel_toplam"], errors="coerce").fillna(0) == 0) &
+                        nonblank["belge_tarihi"].astype(str).str.strip().eq("")
                     )
                     nonblank = nonblank.loc[~mask_blank].copy()
 
@@ -1333,10 +1368,10 @@ elif menu == "İşlem Merkezi":
 
                     if st.button("✅ Google Sheets'e aktar", use_container_width=True, key="btn_import"):
                         if mode.startswith("Yerine"):
-                            out = normalize_sheet(nonblank.drop(columns=["Vade_Date"], errors="ignore"))
+                            out = normalize_sheet(nonblank.drop(columns=["Belge_Date"], errors="ignore"))
                         else:
-                            base = df.copy().drop(columns=["Vade_Date"], errors="ignore")
-                            out = pd.concat([base, nonblank.drop(columns=["Vade_Date"], errors="ignore")], ignore_index=True)
+                            base = df.copy().drop(columns=["Belge_Date"], errors="ignore")
+                            out = pd.concat([base, nonblank.drop(columns=["Belge_Date"], errors="ignore")], ignore_index=True)
                             out = normalize_sheet(out)
 
                         ok, err = save_data(out)
@@ -1453,8 +1488,9 @@ elif menu == "İşlem Merkezi":
                     result["Açıklama"] = st.text_input("Açıklama", value=result.get("Açıklama", ""), key="sr_ack")
 
                 if st.button("💾 Sheets'e kaydet", use_container_width=True, key="btn_scan_save"):
-                    df2 = df.copy().drop(columns=["Vade_Date"], errors="ignore")
-                    df2 = pd.concat([df2, pd.DataFrame([result])], ignore_index=True)
+                    new_row = build_invoice_record(result, ocr_text=ocr_text, source_name=getattr(scan_file, "name", ""))
+                    df2 = df.copy().drop(columns=["Belge_Date"], errors="ignore")
+                    df2 = pd.concat([df2, pd.DataFrame([new_row])], ignore_index=True)
                     df2 = normalize_sheet(df2)
 
                     ok, err = save_data(df2)
@@ -1474,43 +1510,37 @@ elif menu == "İşlem Merkezi":
     with st.container(border=True):
         card_header("Manuel giriş (fallback)", badge="Form", subtitle="Tarama olmazsa veya hızlı eklemek istersen.")
         with st.expander("➕ Yeni kayıt ekle", expanded=False):
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3 = st.columns(3)
             with c1:
                 firma = st.text_input("Firma Adı", key="m_firma")
-                evrak_tipi = st.selectbox("Evrak Tipi", ["Çek", "Senet", "Fatura", "Diğer"], index=0, key="m_tip")
-                banka = st.text_input("Banka", key="m_banka")
-            with c2:
-                tutar = st.number_input("Tutar", value=0.0, step=1000.0, key="m_tutar")
-                doviz = st.selectbox("Döviz", ["TL", "USD", "EUR", "Dolar", "Euro"], index=0, key="m_doviz")
-                vade = st.text_input("Vade (DD.MM.YYYY)", key="m_vade")
-            with c3:
-                aciklama = st.text_input("Açıklama", key="m_ack")
+                evrak_tipi = st.selectbox("Evrak Tipi", ["Fatura", "e-Fatura", "e-Arşiv", "Diğer"], index=0, key="m_tip")
                 evrak_no = st.text_input("Evrak No", key="m_no")
-                durum = st.selectbox("Durum", ["Beklemede", "Ödendi", "Takas"], index=0, key="m_durum")
-            with c4:
-                ceki_veren = st.text_input("Çeki veren", key="m_ceki")
-                cirolu = st.text_input("Cirolu", key="m_cirolu")
-                asil_borclu = st.text_input("Asıl borçlu", key="m_asil")
-                kime_verildi = st.text_input("Kime verildi", key="m_kime")
+            with c2:
+                belge_tarihi = st.text_input("Belge Tarihi (DD.MM.YYYY)", key="m_belge_tarihi")
+                genel_toplam = st.number_input("Genel Toplam", value=0.0, step=100.0, key="m_genel_toplam")
+                para_birimi = st.selectbox("Para Birimi", ["TL", "USD", "EUR"], index=0, key="m_para_birimi")
+            with c3:
+                vergi_kimlik_no = st.text_input("Vergi Kimlik No", key="m_vkn")
+                kategori = st.text_input("Kategori", key="m_kategori")
+                odeme_durumu = st.selectbox("Ödeme Durumu", ["Beklemede", "Ödendi"], index=0, key="m_odeme")
+
+            aciklama = st.text_input("Açıklama", key="m_ack")
 
             if st.button("💾 Kaydet", use_container_width=True, key="m_save"):
-                new_row = {
+                new_row = build_invoice_record({
                     "Firma Adı": firma,
                     "Evrak Tipi": evrak_tipi,
-                    "Banka": banka,
-                    "Tutar": float(tutar),
-                    "Vade": vade,
-                    "Açıklama": aciklama,
-                    "Çeki veren": ceki_veren,
-                    "Cirolu": cirolu,
-                    "Asıl borçlu": asil_borclu,
-                    "Kime verildi": kime_verildi,
                     "Evrak No": evrak_no,
-                    "Döviz": doviz,
-                    "Durum": durum
-                }
-                df2 = df.copy()
-                df2 = pd.concat([df2.drop(columns=["Vade_Date"], errors="ignore"), pd.DataFrame([new_row])], ignore_index=True)
+                    "Vade": belge_tarihi,
+                    "Tutar": genel_toplam,
+                    "Döviz": para_birimi,
+                    "Vergi Kimlik No": vergi_kimlik_no,
+                    "Kategori": kategori,
+                    "Durum": odeme_durumu,
+                    "Açıklama": aciklama,
+                }, source_name="manuel_giris")
+                df2 = df.copy().drop(columns=["Belge_Date"], errors="ignore")
+                df2 = pd.concat([df2, pd.DataFrame([new_row])], ignore_index=True)
                 df2 = normalize_sheet(df2)
 
                 ok, err = save_data(df2)
@@ -1522,7 +1552,7 @@ elif menu == "İşlem Merkezi":
 
         st.divider()
         st.subheader("📌 Mevcut Kayıtlar")
-        st.dataframe(df.drop(columns=["Vade_Date"], errors="ignore"), use_container_width=True, height=420)
+        st.dataframe(df.drop(columns=["Belge_Date"], errors="ignore"), use_container_width=True, height=420)
 
 elif menu == "AI Evrak Analizi":
     st.title("📄 AI Evrak Analizi")
@@ -1603,27 +1633,23 @@ elif menu == "AI Evrak Analizi":
         st.json(result)
 
         st.subheader("✍️ Kaydetmeden önce düzelt")
-        e1, e2, e3, e4 = st.columns(4)
+        e1, e2, e3 = st.columns(3)
         with e1:
             result["Firma Adı"] = st.text_input("Firma Adı", value=result.get("Firma Adı", ""))
-            result["Evrak Tipi"] = st.selectbox("Evrak Tipi", ["Fatura", "Çek", "Senet", "Diğer"], index=0)
-            result["Döviz"] = st.text_input("Döviz", value=result.get("Döviz", "TL"))
-        with e2:
-            result["Tutar"] = st.number_input("Tutar", value=float(result.get("Tutar", 0.0)), step=100.0)
-            result["Vade"] = st.text_input("Vade", value=result.get("Vade", datetime.now().strftime("%d.%m.%Y")))
-            result["Durum"] = st.selectbox("Durum", ["Beklemede", "Ödendi", "Takas"], index=0)
-        with e3:
+            result["Evrak Tipi"] = st.selectbox("Evrak Tipi", ["Fatura", "e-Fatura", "e-Arşiv", "Diğer"], index=0)
             result["Evrak No"] = st.text_input("Evrak No", value=result.get("Evrak No", ""))
-            result["Banka"] = st.text_input("Banka", value=result.get("Banka", ""))
+        with e2:
+            result["Tutar"] = st.number_input("Genel Toplam", value=float(result.get("Tutar", 0.0)), step=100.0)
+            result["Vade"] = st.text_input("Belge Tarihi", value=result.get("Vade", datetime.now().strftime("%d.%m.%Y")))
+            result["Döviz"] = st.text_input("Para Birimi", value=result.get("Döviz", "TL"))
+        with e3:
+            result["Vergi Kimlik No"] = st.text_input("Vergi Kimlik No", value=result.get("Vergi Kimlik No", ""))
+            result["Kategori"] = st.text_input("Kategori", value=result.get("Kategori", ""))
             result["Açıklama"] = st.text_input("Açıklama", value=result.get("Açıklama", ""))
-        with e4:
-            result["Çeki veren"] = st.text_input("Çeki veren", value=result.get("Çeki veren", ""))
-            result["Cirolu"] = st.text_input("Cirolu", value=result.get("Cirolu", ""))
-            result["Asıl borçlu"] = st.text_input("Asıl borçlu", value=result.get("Asıl borçlu", ""))
-            result["Kime verildi"] = st.text_input("Kime verildi", value=result.get("Kime verildi", ""))
+            result["Durum"] = st.selectbox("Ödeme Durumu", ["Beklemede", "Ödendi"], index=0)
 
         if st.button("💾 Google Sheets'e Kaydet", use_container_width=True):
-            df2 = df.copy().drop(columns=["Vade_Date"], errors="ignore")
+            df2 = df.copy().drop(columns=["Belge_Date"], errors="ignore")
             df2 = pd.concat([df2, pd.DataFrame([result])], ignore_index=True)
             df2 = normalize_sheet(df2)
 
