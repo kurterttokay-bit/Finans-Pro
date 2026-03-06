@@ -597,7 +597,7 @@ if GSheetsConnection is None:
     st.error("GSheetsConnection kütüphanesi bulunamadı. requirements.txt kontrol edin.")
     st.stop()
 
-df = read_sheet(conn)
+conn = st.connection("gsheets", type=GSheetsConnection)
 
 # -------------------------
 # COLUMN NORMALIZATION (Sayfa1)
@@ -741,40 +741,20 @@ def render_invoice_review_form(result: dict, key_prefix: str = "rev") -> dict:
 # -------------------------
 # DATA LOAD / SAVE
 # -------------------------
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=30)
 def load_data():
-    last_err = None
-
-    def try_read(**kwargs):
-        nonlocal last_err
-        try:
-            raw = conn.read(**kwargs)
-            return raw, None
-        except Exception as e:
-            last_err = e
-            return None, e
-
-    raw, err = try_read()
-    if raw is not None and not raw.empty:
+    try:
+        raw = read_sheet(conn, worksheet=WORKSHEET_NAME)
         st.session_state["_gsheets_last_error"] = ""
         return normalize_sheet(raw)
-
-    raw, err = try_read(worksheet=WORKSHEET_NAME)
-    if raw is not None and not raw.empty:
-        st.session_state["_gsheets_last_error"] = ""
-        return normalize_sheet(raw)
-
-    raw, err = try_read(worksheet="Sheet1")
-    if raw is not None and not raw.empty:
-        st.session_state["_gsheets_last_error"] = ""
-        return normalize_sheet(raw)
-
-    st.session_state["_gsheets_last_error"] = str(last_err) if last_err else "Boş veri döndü (Sheet boş olabilir)."
-    return normalize_sheet(pd.DataFrame(columns=CANON_COLS))
+    except Exception as e:
+        st.session_state["_gsheets_last_error"] = str(e)
+        return normalize_sheet(pd.DataFrame(columns=CANON_COLS))
 
 def save_data(df: pd.DataFrame):
     try:
-        conn.update(worksheet=WORKSHEET_NAME, data=df[CANON_COLS])
+        cleaned = normalize_sheet(df).drop(columns=["Belge_Date"], errors="ignore")
+        replace_sheet(conn, cleaned[CANON_COLS], worksheet=WORKSHEET_NAME)
         st.cache_data.clear()
         return True, ""
     except Exception as e:
