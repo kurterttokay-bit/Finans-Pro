@@ -745,9 +745,10 @@ ELİNDE QR/ OCR varsa bunları mutlaka kullan:
 QR_VERI: {qr_list}
 OCR_METIN: {ocr_text[:4000]}
 
-SADECE JSON döndür. Açıklama ekleme.
+Sadece geçerli bir JSON nesnesi döndür.
+Açıklama, markdown, kod bloğu ekleme.
 
-Şu şemaya uy:
+Şema:
 {{
   "firma_adi": "",
   "evrak_tipi": "Fatura",
@@ -763,64 +764,49 @@ Notlar:
 - tutarı KDV dahil toplam ödenecek tutar olarak yakala.
 - dövizi bulamazsan TL yaz.
 - evrak_no: fatura no.
+- Eğer bir alan bulunamazsa boş string döndür. Tahmin uydurma.
 """
 
     try:
         response, used_model = _generate_with_fallback([prompt, image])
-        text = getattr(response, "text", "") or ""
-        if not text and getattr(response, "candidates", None):
-            text = response.candidates[0].content.parts[0].text
+        text = extract_response_text(response)
 
-        from json_utils import safe_json_loads
-        
         data = safe_json_loads(text)
-if not data and ocr_text:
-    logging.warning("Gorsel+prompt parse edilemedi, text-only fallback deneniyor.")
-    return analyze_invoice_text_only(ocr_text, qr_list=qr_list)        
+        if not data and ocr_text:
+            logging.warning("Gorsel+prompt parse edilemedi, text-only fallback deneniyor.")
+            return analyze_invoice_text_only(ocr_text, qr_list=qr_list)
+
         if not data:
+            logging.warning("Image AI response parse edilemedi: %s", text[:1000])
             return None
-        firma = str(data.get("firma_adi", "")).strip()
-        evrak_tipi = str(data.get("evrak_tipi", "Fatura")).strip() or "Fatura"
-        doviz = str(data.get("doviz", "TL")).strip() or "TL"
-        evrak_no = str(data.get("evrak_no", "")).strip()
-        aciklama = str(data.get("aciklama", "")).strip()
-
-        tutar = data.get("tutar", 0)
-        try:
-            tutar = float(str(tutar).replace(".", "").replace(",", "."))
-        except Exception:
-            tutar = 0.0
-
-        vade = str(data.get("vade", "")).strip()
-        if vade and "-" in vade and "." not in vade:
-            vade = vade.replace("-", ".")
-        if not vade:
-            vade = datetime.now().strftime("%d.%m.%Y")
 
         return {
-            "Firma Adı": firma,
-            "Evrak Tipi": evrak_tipi,
+            "Firma Adı": str(data.get("firma_adi", "")).strip(),
+            "Evrak Tipi": str(data.get("evrak_tipi", "Fatura")).strip() or "Fatura",
             "Banka": "",
-            "Tutar": tutar,
-            "Vade": vade,
-            "Açıklama": aciklama,
+            "Tutar": normalize_amount(data.get("tutar", 0)),
+            "Vade": normalize_date(data.get("vade", "")),
+            "Açıklama": str(data.get("aciklama", "")).strip(),
             "Çeki veren": "",
             "Cirolu": "",
             "Asıl borçlu": "",
             "Kime verildi": "",
-            "Evrak No": evrak_no,
-            "Döviz": doviz,
+            "Evrak No": str(data.get("evrak_no", "")).strip(),
+            "Döviz": normalize_currency(data.get("doviz", "TL")),
             "Durum": "Beklemede"
         }
     except Exception as e:
         logging.exception(e)
         return None
 
-def analyze_invoice_text_only(ocr_text: str):
+
+def analyze_invoice_text_only(ocr_text: str, qr_list: list[str] | None = None):
     """Fallback extraction when we can't render a PDF to image."""
+    qr_list = qr_list or []
     prompt = f"""
 Sen bir finans muhasebe asistanısın. Elinde sadece metin var (PDF içi metin/OCR).
 
+QR_VERI: {qr_list}
 OCR_METIN:
 {ocr_text[:8000]}
 
@@ -848,75 +834,11 @@ Notlar:
 
     try:
         response, used_model = _generate_with_fallback([prompt])
-        text = extract_response_text(response) or ""
-        if not text and getattr(response, "candidates", None):
-            text = response.candidates[0].content.parts[0].text
+        text = extract_response_text(response)
 
         data = safe_json_loads(text)
         if not data:
             logging.warning("Text-only AI response parse edilemedi: %s", text[:1000])
-            return None
-
-        return {
-            "Firma Adı": str(data.get("firma_adi", "")).strip(),
-            "Evrak Tipi": str(data.get("evrak_tipi", "Fatura")).strip() or "Fatura",
-            "Banka": "",
-            "Tutar": normalize_amount(data.get("tutar", 0)),
-            "Vade": normalize_date(data.get("vade", "")),
-            "Açıklama": str(data.get("aciklama", "")).strip(),
-            "Çeki veren": "",
-            "Cirolu": "",
-            "Asıl borçlu": "",
-            "Kime verildi": "",
-            "Evrak No": str(data.get("evrak_no", "")).strip(),
-            "Döviz": normalize_currency(data.get("doviz", "TL")),
-            "Durum": "Beklemede"
-        }
-    except Exception as e:
-        logging.exception(e)
-        return None
-
-
-def analyze_invoice(image: Image.Image, ocr_text: str = "", qr_list: list[str] | None = None):
-    qr_list = qr_list or []
-    prompt = f"""
-Sen bir finans muhasebe asistanısın. Bu görsel bir fatura / e-fatura olabilir.
-
-ELİNDE QR/ OCR varsa bunları mutlaka kullan:
-QR_VERI: {qr_list}
-OCR_METIN: {ocr_text[:4000]}
-
-Sadece geçerli bir JSON nesnesi döndür.
-Açıklama, markdown, kod bloğu ekleme.
-
-Şema:
-{{
-  "firma_adi": "",
-  "evrak_tipi": "Fatura",
-  "tutar": 0,
-  "vade": "DD.MM.YYYY",
-  "aciklama": "",
-  "evrak_no": "",
-  "doviz": "TL"
-}}
-
-Notlar:
-- vade yoksa fatura tarihini vade olarak yaz.
-- tutarı KDV dahil toplam ödenecek tutar olarak yakala.
-- dövizi bulamazsan TL yaz.
-- evrak_no: fatura no.
-- Eğer bir alan bulunamazsa boş string döndür. Tahmin uydurma.
-"""
-
-    try:
-        response, used_model = _generate_with_fallback([prompt, image])
-        text = getattr(response, "text", "") or ""
-        if not text and getattr(response, "candidates", None):
-            text = response.candidates[0].content.parts[0].text
-
-        data = safe_json_loads(text)
-        if not data:
-            logging.warning("Image AI response parse edilemedi: %s", text[:1000])
             return None
 
         return {
