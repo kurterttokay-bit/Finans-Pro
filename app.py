@@ -8,6 +8,7 @@ from PIL import Image
 import json
 import re
 import logging
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 import plotly.express as px
 import os
 from urllib.parse import urlencode
@@ -759,7 +760,7 @@ def run_write_test_record():
 def get_fx():
     def _safe_rate(ticker: str, fallback: float) -> float:
         try:
-            fx = yf.download(ticker, period="5d", progress=False, auto_adjust=False)
+            fx = yf.download(ticker, period="5d", progress=False, auto_adjust=False, threads=False)
             if fx is None or fx.empty or "Close" not in fx.columns:
                 return fallback
             close = fx["Close"].dropna()
@@ -767,7 +768,7 @@ def get_fx():
                 return fallback
             return float(close.iloc[-1])
         except Exception as e:
-            logging.error("FX rate fetch failed for %s: %s", ticker, e)
+            logging.warning("FX rate fetch failed for %s; fallback kullanılacak.", ticker)
             return fallback
     usd = _safe_rate("USDTRY=X", 34.90)
     eur = _safe_rate("EURTRY=X", 37.80)
@@ -853,7 +854,7 @@ def parse_invoice_from_qr(qr_text: str) -> dict | None:
 def get_fx():
     def _safe_rate(ticker: str, fallback: float) -> float:
         try:
-            fx = yf.download(ticker, period="5d", progress=False, auto_adjust=False)
+            fx = yf.download(ticker, period="5d", progress=False, auto_adjust=False, threads=False)
             if fx is None or fx.empty or "Close" not in fx.columns:
                 return fallback
             close = fx["Close"].dropna()
@@ -861,7 +862,7 @@ def get_fx():
                 return fallback
             return float(close.iloc[-1])
         except Exception as e:
-            logging.error("FX rate fetch failed for %s: %s", ticker, e)
+            logging.warning("FX rate fetch failed for %s; fallback kullanılacak.", ticker)
             return fallback
     usd = _safe_rate("USDTRY=X", 34.90)
     eur = _safe_rate("EURTRY=X", 37.80)
@@ -1328,7 +1329,7 @@ def render_scan_center(section_key: str = "scan", title: str = "Tarama → Otoma
         with c2:
             archive = st.checkbox("Görseli arşivle", value=True, key=f"{section_key}_archive")
 
-        if scan_file and st.button("🧠 Tara & çıkar", use_container_width=True, key=f"{section_key}_run"):
+        if scan_file and st.button("🧠 Tara & çıkar", width="stretch", key=f"{section_key}_run"):
             with st.spinner("Evrak işleniyor..."):
                 payload = process_uploaded_invoice(scan_file, do_ocr=do_ocr)
             st.session_state[f"_{section_key}_payload"] = payload
@@ -1344,10 +1345,10 @@ def render_scan_center(section_key: str = "scan", title: str = "Tarama → Otoma
                 c1, c2 = st.columns(2)
                 with c1:
                     if raw_image is not None:
-                        st.image(raw_image, caption="Orijinal", use_container_width=True)
+                        st.image(raw_image, caption="Orijinal", width="stretch")
                 with c2:
                     if image is not None:
-                        st.image(image, caption="İyileştirilmiş", use_container_width=True)
+                        st.image(image, caption="İyileştirilmiş", width="stretch")
             if qr_list:
                 st.success("✅ QR bulundu")
                 st.code(qr_list[0])
@@ -1361,7 +1362,7 @@ def render_scan_center(section_key: str = "scan", title: str = "Tarama → Otoma
             else:
                 st.success("✅ Alanlar çıkarıldı. Kaydetmeden önce gözden geçir.")
                 edited_result = render_invoice_review_form(result, key_prefix=f"{section_key}_review")
-                if st.button("💾 Sheets'e kaydet", use_container_width=True, key=f"{section_key}_save"):
+                if st.button("💾 Sheets'e kaydet", width="stretch", key=f"{section_key}_save"):
                     new_row = build_invoice_record(edited_result, ocr_text=ocr_text, source_name=payload.get("source_name", ""))
                     ok, err = save_single_record(new_row)
                     if ok:
@@ -1389,7 +1390,7 @@ def render_scan_center(section_key: str = "scan", title: str = "Tarama → Otoma
                 bulk_archive = st.checkbox("Toplu işlemde görselleri arşivle", value=False, key=f"{section_key}_bulk_archive")
             if bulk_files:
                 st.caption(f"Seçilen dosya: {len(bulk_files)}")
-            if bulk_files and st.button("📦 Toplu tara ve kaydet", use_container_width=True, key=f"{section_key}_bulk_run"):
+            if bulk_files and st.button("📦 Toplu tara ve kaydet", width="stretch", key=f"{section_key}_bulk_run"):
                 rows = []
                 prepared_records = []
                 prepared_payloads = []
@@ -1435,7 +1436,7 @@ def render_scan_center(section_key: str = "scan", title: str = "Tarama → Otoma
                             r["mesaj"] = err
                 st.success(f"Toplu işlem bitti. Başarılı: {success_count} · Hatalı: {fail_count}")
                 if rows:
-                    st.dataframe(pd.DataFrame(rows), use_container_width=True, height=320)
+                    st.dataframe(pd.DataFrame(rows), width="stretch", height=320)
 
 # -------------------------
 # SIDEBAR (menu + settings)
@@ -1573,7 +1574,7 @@ if menu == "Dashboard":
         else:
             pay = valid.groupby("Belge_Date")[amt_col].sum().reset_index()
             fig = px.bar(pay, x="Belge_Date", y=amt_col)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         st.markdown("</div>", unsafe_allow_html=True)
     with right:
         st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -1586,10 +1587,10 @@ if menu == "Dashboard":
                 bins=[-10**6, -1, 7, 30, 90, 10**6],
                 labels=["Geciken", "0-7", "8-30", "31-90", "90+"]
             )
-            risk = valid.groupby(bins)[amt_col].sum().reset_index()
+            risk = valid.groupby(bins, observed=False)[amt_col].sum().reset_index()
             risk.columns = ["Risk", "Tutar"]
             fig2 = px.pie(risk, names="Risk", values="Tutar", hole=0.55)
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, width="stretch")
         st.markdown("</div>", unsafe_allow_html=True)
     st.markdown("---")
     a, b = st.columns([1, 1])
@@ -1601,7 +1602,7 @@ if menu == "Dashboard":
         else:
             top = valid.groupby("firma_adi")[amt_col].sum().sort_values(ascending=False).head(10).reset_index()
             fig3 = px.bar(top, x="firma_adi", y=amt_col)
-            st.plotly_chart(fig3, use_container_width=True)
+            st.plotly_chart(fig3, width="stretch")
         st.markdown("</div>", unsafe_allow_html=True)
     with b:
         st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -1628,7 +1629,7 @@ if menu == "Dashboard":
             m2.metric("60 gün", f"{bal60:,.0f} ₺")
             m3.metric("90 gün", f"{bal90:,.0f} ₺")
             fig4 = px.line(timeline, x="date", y="balance")
-            st.plotly_chart(fig4, use_container_width=True)
+            st.plotly_chart(fig4, width="stretch")
         st.markdown("</div>", unsafe_allow_html=True)
     st.markdown("---")
     c1, c2 = st.columns([1.25, 1])
@@ -1640,12 +1641,12 @@ if menu == "Dashboard":
         else:
             risk_table = valid.sort_values("days_to_due").head(15)
             show_cols = ["firma_adi", "evrak_tipi", "belge_tarihi", "days_to_due", "Tutar_TL", "para_birimi", "odeme_durumu", "evrak_no", "aciklama"]
-            st.dataframe(risk_table[show_cols], use_container_width=True, height=420)
+            st.dataframe(risk_table[show_cols], width="stretch", height=420)
         st.markdown("</div>", unsafe_allow_html=True)
     with c2:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         card_header("🧠 AI CFO", badge="Analiz", subtitle="Filtreleri ayarladıktan sonra çalıştır.")
-        if st.button("🧠 AI CFO Analizi Yap", use_container_width=True):
+        if st.button("🧠 AI CFO Analizi Yap", width="stretch"):
             with st.spinner("AI analiz ediyor..."):
                 sample = compute_tl(data, usd, eur).head(80).to_dict()
                 prompt = f"""
@@ -1751,7 +1752,7 @@ elif menu == "İşlem Merkezi":
                 data=make_template_xlsx(),
                 file_name="finans_sablon.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
+                width="stretch"
             )
             st.markdown("<div class='muted'>Sheet adı: <b>Sayfa1</b>. Kolonlar otomatik normalize edilir.</div>", unsafe_allow_html=True)
         elif step == "2) Upload & işle":
@@ -1763,7 +1764,7 @@ elif menu == "İşlem Merkezi":
                     incoming = read_template_xlsx(up)
                     incoming_view = incoming.drop(columns=["Belge_Date"], errors="ignore")
                     st.markdown("<div class='muted'>Önizleme (ilk 20 satır):</div>", unsafe_allow_html=True)
-                    st.dataframe(incoming_view.head(20), use_container_width=True, height=260)
+                    st.dataframe(incoming_view.head(20), width="stretch", height=260)
                     nonblank = incoming.copy()
                     mask_blank = (
                         nonblank["firma_adi"].astype(str).str.strip().eq("") &
@@ -1775,7 +1776,7 @@ elif menu == "İşlem Merkezi":
                         f"<div class='muted'>Yüklü satır: <b>{len(incoming)}</b> · Boş sayılan satır hariç: <b>{len(nonblank)}</b></div>",
                         unsafe_allow_html=True
                     )
-                    if st.button("✅ Google Sheets'e aktar", use_container_width=True, key="btn_import"):
+                    if st.button("✅ Google Sheets'e aktar", width="stretch", key="btn_import"):
                         if mode.startswith("Yerine"):
                             out = normalize_sheet(nonblank.drop(columns=["Belge_Date"], errors="ignore"))
                         else:
@@ -1794,7 +1795,7 @@ elif menu == "İşlem Merkezi":
             card_header("Google Sheets'te devam et", badge="Live", subtitle="Sheet'i aç, doğrudan oradan düzenle.")
             sheets_url = get_sheets_url()
             if sheets_url:
-                st.link_button("🔗 Google Sheets'i aç", sheets_url, use_container_width=True)
+                st.link_button("🔗 Google Sheets'i aç", sheets_url, width="stretch")
                 st.markdown("<div class='muted'>Sheets'te düzenle — Dashboard otomatik yansır.</div>", unsafe_allow_html=True)
             else:
                 st.warning("Sheets linki secrets içinde bulunamadı. `SHEETS_URL` ya da `connections.gsheets.spreadsheet` tanımlı olmalı.")
@@ -1804,7 +1805,7 @@ elif menu == "İşlem Merkezi":
             scan_file = st.file_uploader("Evrak yükle (PDF/Resim)", type=types, key="scan_file")
             do_ocr = st.checkbox("OCR kullan (varsa)", value=False, disabled=not OCR_ENABLED, key="scan_ocr")
             archive = st.checkbox("Görseli arşivle", value=True, key="scan_archive")
-            if scan_file and st.button("🧠 Tara & çıkar", use_container_width=True, key="btn_scan"):
+            if scan_file and st.button("🧠 Tara & çıkar", width="stretch", key="btn_scan"):
                 raw_image = None
                 ocr_text = ""
                 if scan_file.type == "application/pdf":
@@ -1875,7 +1876,7 @@ elif menu == "İşlem Merkezi":
                 st.divider()
                 st.markdown("<div class='muted'>Kaydetmeden önce bilgileri kontrol et:</div>", unsafe_allow_html=True)
                 edited_result = render_invoice_review_form(result, key_prefix="scan_review")
-                if st.button("💾 Sheets'e kaydet", use_container_width=True, key="btn_scan_save"):
+                if st.button("💾 Sheets'e kaydet", width="stretch", key="btn_scan_save"):
                     source_name = st.session_state.get("_scan_source_name", getattr(scan_file, "name", ""))
                     scan_ocr_text = st.session_state.get("_scan_ocr_text", "")
                     new_row = build_invoice_record(edited_result, ocr_text=scan_ocr_text, source_name=source_name)
@@ -1910,7 +1911,7 @@ elif menu == "İşlem Merkezi":
                 kategori = st.text_input("Kategori", key="m_kategori")
                 odeme_durumu = st.selectbox("Ödeme Durumu", ["Beklemede", "Ödendi"], index=0, key="m_odeme")
             aciklama = st.text_input("Açıklama", key="m_ack")
-            if st.button("💾 Kaydet", use_container_width=True, key="m_save"):
+            if st.button("💾 Kaydet", width="stretch", key="m_save"):
                 new_row = build_invoice_record({
                     "Firma Adı": firma,
                     "Evrak Tipi": evrak_tipi,
@@ -1931,7 +1932,7 @@ elif menu == "İşlem Merkezi":
                     st.error(f"Kaydedilemedi: {err}")
         st.divider()
         st.subheader("📌 Mevcut Kayıtlar")
-        st.dataframe(df.drop(columns=["Belge_Date"], errors="ignore"), use_container_width=True, height=420)
+        st.dataframe(df.drop(columns=["Belge_Date"], errors="ignore"), width="stretch", height=420)
 elif menu == "AI Evrak Analizi":
     st.title("📄 AI Evrak Analizi")
     st.markdown("<div class='muted'>Detaylı önizleme + OCR/QR + manuel düzeltme.</div>", unsafe_allow_html=True)
@@ -1945,7 +1946,7 @@ elif menu == "AI Evrak Analizi":
         else:
             do_ocr = st.checkbox("OCR kullan (varsa)", value=False, disabled=not OCR_ENABLED, key="detail_ocr")
             archive = st.checkbox("Görseli arşivle", value=True, key="detail_archive")
-            if st.button("🧠 AI ile Analiz Et", use_container_width=True, key="btn_detail_ai"):
+            if st.button("🧠 AI ile Analiz Et", width="stretch", key="btn_detail_ai"):
                 with st.spinner("Evrak işleniyor..."):
                     payload = process_uploaded_invoice(uploaded, do_ocr=do_ocr)
                 st.session_state["_detail_payload"] = payload
@@ -1960,11 +1961,11 @@ elif menu == "AI Evrak Analizi":
                 with c1:
                     if raw_image is not None:
                         card_header("Orijinal", badge="Preview")
-                        st.image(raw_image, use_container_width=True)
+                        st.image(raw_image, width="stretch")
                 with c2:
                     if image is not None:
                         card_header("İyileştirilmiş", badge="AI/OCR")
-                        st.image(image, use_container_width=True)
+                        st.image(image, width="stretch")
                 if qr_list:
                     st.success("✅ QR bulundu")
                     st.write(qr_list[0])
@@ -1977,7 +1978,7 @@ elif menu == "AI Evrak Analizi":
                     st.json(result)
                     st.subheader("✍️ Kaydetmeden önce düzelt")
                     edited_result = render_invoice_review_form(result, key_prefix="detail_review")
-                    if st.button("💾 Google Sheets'e Kaydet", use_container_width=True, key="btn_detail_save"):
+                    if st.button("💾 Google Sheets'e Kaydet", width="stretch", key="btn_detail_save"):
                         new_row = build_invoice_record(edited_result, ocr_text=ocr_text, source_name=getattr(uploaded, "name", ""))
                         ok, err = save_single_record(new_row)
                         if ok:
@@ -1993,7 +1994,7 @@ elif menu == "AI Evrak Analizi":
         st.markdown("<div class='muted'>E-arşiv / e-fatura portalından indirdiğin PDF'leri toplu seçip tek seferde işleyebilirsin.</div>", unsafe_allow_html=True)
         bulk_files = st.file_uploader("Toplu evrak yükle", type=types, accept_multiple_files=True, key="ai_bulk_uploader")
         bulk_ocr = st.checkbox("Toplu işlemde OCR kullan (varsa)", value=False, disabled=not OCR_ENABLED, key="bulk_ocr")
-        if bulk_files and st.button("📦 Toplu analiz et ve kaydet", use_container_width=True, key="btn_bulk_save"):
+        if bulk_files and st.button("📦 Toplu analiz et ve kaydet", width="stretch", key="btn_bulk_save"):
             rows = []
             success_count = 0
             fail_count = 0
@@ -2037,7 +2038,7 @@ elif menu == "AI Evrak Analizi":
                 progress.progress(i / max(len(bulk_files), 1))
             st.success(f"Toplu işlem bitti. Başarılı: {success_count} · Hatalı: {fail_count}")
             if rows:
-                st.dataframe(pd.DataFrame(rows), use_container_width=True, height=320)
+                st.dataframe(pd.DataFrame(rows), width="stretch", height=320)
 # -------------------------
 # AI CFO CHAT
 # -------------------------
@@ -2050,7 +2051,7 @@ elif menu == "AI CFO Chat":
         st.stop()
     st.markdown('<div class="card">', unsafe_allow_html=True)
     q = st.text_area("Soru", placeholder="örn: Önümüzdeki 30 gün nakit riskim nedir? En riskli firmalar hangileri?")
-    if st.button("Sor", use_container_width=True) and q.strip():
+    if st.button("Sor", width="stretch") and q.strip():
         with st.spinner("AI düşünüyor..."):
             sample = compute_tl(df, usd, eur).head(120).to_dict()
             prompt = f"""
