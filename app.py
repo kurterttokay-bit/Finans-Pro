@@ -49,6 +49,8 @@ st.set_page_config(page_title="Finans Enterprise", page_icon="🏦", layout="wid
 logging.basicConfig(level=logging.INFO)
 APP_TITLE = "🏦 Finans Enterprise"
 WORKSHEET_NAME = "Sayfa1"  # Google Sheets worksheet
+CORRECTIONS_WORKSHEET = "DuzeltmeHafizasi"
+CORRECTIONS_COLUMNS = ["tarih", "kaynak_dosya", "ham_firma", "duzeltilmis_firma", "ham_kategori", "duzeltilmis_kategori", "ham_metin", "not"]
 def get_sheets_url() -> str:
     """Try to find the Google Sheets URL from secrets in multiple common locations."""
     # 1) Top-level SHEETS_URL
@@ -731,6 +733,86 @@ def save_many_records(records: list[dict]):
         return False, str(e)
 
 
+
+
+@st.cache_data(ttl=30)
+def load_corrections_data():
+    try:
+        raw = conn.read(worksheet=CORRECTIONS_WORKSHEET)
+        if raw is None or getattr(raw, "empty", True):
+            return pd.DataFrame(columns=CORRECTIONS_COLUMNS)
+        dfc = pd.DataFrame(raw).copy()
+        dfc.columns = [str(c).strip() for c in dfc.columns]
+        for col in CORRECTIONS_COLUMNS:
+            if col not in dfc.columns:
+                dfc[col] = ""
+        dfc = dfc[CORRECTIONS_COLUMNS].copy()
+        dfc = dfc.replace(r"^\s*$", pd.NA, regex=True).dropna(how="all").fillna("")
+        return dfc
+    except Exception:
+        return pd.DataFrame(columns=CORRECTIONS_COLUMNS)
+
+
+def append_correction_record(record: dict):
+    try:
+        current = load_corrections_data()
+        clean = {col: record.get(col, "") for col in CORRECTIONS_COLUMNS}
+        updated = pd.concat([current, pd.DataFrame([clean])], ignore_index=True)
+        conn.update(worksheet=CORRECTIONS_WORKSHEET, data=updated)
+        st.cache_data.clear()
+        return True, ""
+    except Exception as e:
+        logging.exception(e)
+        return False, str(e)
+
+
+def apply_vendor_enrichment(result: dict | None, raw_text: str = "") -> dict | None:
+    if not result:
+        return result
+    try:
+        corrections_df = load_corrections_data()
+    except Exception:
+        corrections_df = pd.DataFrame(columns=CORRECTIONS_COLUMNS)
+    canonical = {
+        "firma_adi": (result.get("Firma Adı") or result.get("firma_adi") or "").strip(),
+        "kategori": (result.get("Kategori") or result.get("kategori") or "").strip(),
+        "aciklama": (result.get("Açıklama") or result.get("aciklama") or "").strip(),
+    }
+    enriched = enrich_invoice_fields(canonical, raw_text=raw_text or "", corrections_df=corrections_df)
+    out = dict(result)
+    if enriched.get("firma_adi"):
+        out["Firma Adı"] = enriched.get("firma_adi")
+        out["firma_adi"] = enriched.get("firma_adi")
+    if enriched.get("kategori"):
+        out["Kategori"] = enriched.get("kategori")
+        out["kategori"] = enriched.get("kategori")
+    if enriched.get("rule_source"):
+        out["Kural Kaynağı"] = enriched.get("rule_source")
+        out["rule_source"] = enriched.get("rule_source")
+    return out
+
+
+def maybe_store_correction(source_name: str, original_result: dict | None, edited_result: dict | None, raw_text: str = ""):
+    original_result = original_result or {}
+    edited_result = edited_result or {}
+    raw_vendor = str(original_result.get("Firma Adı") or original_result.get("firma_adi") or "").strip()
+    corrected_vendor = str(edited_result.get("Firma Adı") or edited_result.get("firma_adi") or "").strip()
+    raw_category = str(original_result.get("Kategori") or original_result.get("kategori") or "").strip()
+    corrected_category = str(edited_result.get("Kategori") or edited_result.get("kategori") or "").strip()
+    if raw_vendor == corrected_vendor and raw_category == corrected_category:
+        return True, ""
+    record = build_correction_record(
+        source_name=source_name or "",
+        raw_vendor=raw_vendor,
+        corrected_vendor=corrected_vendor,
+        raw_category=raw_category,
+        corrected_category=corrected_category,
+        raw_text=raw_text or "",
+        note="manuel duzeltme",
+    )
+    return append_correction_record(record)
+
+
 def run_write_test_record():
     now = datetime.now()
     test_record = {
@@ -1338,7 +1420,7 @@ def render_scan_center(section_key: str = "scan", title: str = "Tarama → Otoma
 
         payload = st.session_state.get(f"_{section_key}_payload")
         if payload and payload.get("source_name") == getattr(scan_file, "name", None):
-            result = payload.get("result")
+            result = apply_vendor_enrichment(payload.get("result"), raw_text=payload.get("ocr_text", ""))
             image = payload.get("image")
             raw_image = payload.get("raw_image")
             ocr_text = payload.get("ocr_text", "")
@@ -1365,6 +1447,7 @@ def render_scan_center(section_key: str = "scan", title: str = "Tarama → Otoma
                 st.success("✅ Alanlar çıkarıldı. Kaydetmeden önce gözden geçir.")
                 edited_result = render_invoice_review_form(result, key_prefix=f"{section_key}_review")
                 if st.button("💾 Sheets'e kaydet", width="stretch", key=f"{section_key}_save"):
+                    maybe_store_correction(payload.get("source_name", ""), result, edited_result, raw_text=ocr_text)
                     new_row = build_invoice_record(edited_result, ocr_text=ocr_text, source_name=payload.get("source_name", ""))
                     ok, err = save_single_record(new_row)
                     if ok:
@@ -1408,7 +1491,7 @@ def render_scan_center(section_key: str = "scan", title: str = "Tarama → Otoma
                             pass
                         file_bytes = uf.read()
                     payload = process_uploaded_invoice_bytes(file_bytes, source_name=getattr(uf, "name", ""), file_type=getattr(uf, "type", "") or "", do_ocr=bulk_ocr)
-                    result = payload.get("result")
+                    result = apply_vendor_enrichment(payload.get("result"), raw_text=payload.get("ocr_text", ""))
                     if result:
                         row = build_invoice_record(result, ocr_text=payload.get("ocr_text", ""), source_name=payload.get("source_name", ""))
                         prepared_records.append(row)
@@ -1958,8 +2041,9 @@ elif menu == "AI Evrak Analizi":
                 image = payload.get("image")
                 ocr_text = payload.get("ocr_text", "")
                 qr_list = payload.get("qr_list", [])
-                result = payload.get("result")
+                result = apply_vendor_enrichment(payload.get("result"), raw_text=payload.get("ocr_text", ""))
                 c1, c2 = st.columns(2)
+
                 with c1:
                     if raw_image is not None:
                         card_header("Orijinal", badge="Preview")
@@ -2003,9 +2087,10 @@ elif menu == "AI Evrak Analizi":
             progress = st.progress(0)
             for i, uf in enumerate(bulk_files, start=1):
                 payload = process_uploaded_invoice(uf, do_ocr=bulk_ocr)
-                result = payload.get("result")
+                result = apply_vendor_enrichment(payload.get("result"), raw_text=payload.get("ocr_text", ""))
                 if result:
                     row = build_invoice_record(result, ocr_text=payload.get("ocr_text", ""), source_name=payload.get("source_name", ""))
+
                     ok, err = save_single_record(row)
                     if ok:
                         success_count += 1
