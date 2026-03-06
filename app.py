@@ -1635,7 +1635,7 @@ elif menu == "AI Evrak Analizi":
     st.markdown("<div class='muted'>Detaylı önizleme + OCR/QR + manuel düzeltme.</div>", unsafe_allow_html=True)
     st.markdown("<div class='accent-line'></div>", unsafe_allow_html=True)
 
-    types = ["png", "jpg", "jpeg"]
+    types = ["png", "jpg", "jpeg", "pdf"]
     if PDF_ENABLED:
         types.append("pdf")
 
