@@ -13,6 +13,7 @@ import os
 from urllib.parse import urlencode
 from io import BytesIO
 from invoice_normalizers import normalize_amount, normalize_currency, normalize_date
+from sheet_ops import read_sheet, append_row, replace_sheet, SHEET_COLUMNS
 # -------------------------
 # OPTIONAL LIBS (PDF / OCR)
 # -------------------------
