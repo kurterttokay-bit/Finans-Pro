@@ -547,6 +547,7 @@ FALLBACK_MODELS = [
 ]
 
 def _generate_with_fallback(parts):
+    
     """Try generate_content with a few model names to survive 404 / unsupported errors."""
     last_err = None
     tried = []
@@ -560,7 +561,33 @@ def _generate_with_fallback(parts):
             last_err = e
             continue
     raise RuntimeError(f"AI çağrısı başarısız. Denenen modeller: {tried}. Son hata: {last_err}")
+def extract_response_text(response):
+    """
+    Gemini yanıtından güvenli şekilde text çıkarmaya çalışır.
+    """
+    try:
+        text = getattr(response, "text", "") or ""
+        if text and text.strip():
+            return text.strip()
+    except Exception:
+        pass
 
+    try:
+        candidates = getattr(response, "candidates", None)
+        if candidates:
+            parts = candidates[0].content.parts
+            collected = []
+            for p in parts:
+                t = getattr(p, "text", "")
+                if t:
+                    collected.append(t)
+            joined = "\n".join(collected).strip()
+            if joined:
+                return joined
+    except Exception:
+        pass
+
+    return ""
 # -------------------------
 # GSHEETS CONNECTION
 # -------------------------
@@ -747,6 +774,9 @@ Notlar:
         from json_utils import safe_json_loads
         
         data = safe_json_loads(text)
+if not data and ocr_text:
+    logging.warning("Gorsel+prompt parse edilemedi, text-only fallback deneniyor.")
+    return analyze_invoice_text_only(ocr_text, qr_list=qr_list)        
         if not data:
             return None
         firma = str(data.get("firma_adi", "")).strip()
@@ -818,7 +848,7 @@ Notlar:
 
     try:
         response, used_model = _generate_with_fallback([prompt])
-        text = getattr(response, "text", "") or ""
+        text = extract_response_text(response) or ""
         if not text and getattr(response, "candidates", None):
             text = response.candidates[0].content.parts[0].text
 
