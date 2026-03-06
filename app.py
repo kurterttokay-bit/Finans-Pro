@@ -769,6 +769,20 @@ def save_data(df: pd.DataFrame):
         logging.exception(e)
         return False, str(e)
 
+
+def save_single_record(record: dict):
+    """Append one normalized record directly to Google Sheets.
+    This avoids stale cached df / full-sheet overwrite issues in AI save flows.
+    """
+    try:
+        clean = {col: record.get(col, "") for col in SHEET_COLUMNS}
+        append_row(conn, clean, worksheet=WORKSHEET_NAME)
+        st.cache_data.clear()
+        return True, ""
+    except Exception as e:
+        logging.exception(e)
+        return False, str(e)
+
 # -------------------------
 # FX RATES
 # -------------------------
@@ -842,71 +856,6 @@ def ocr_read(image: Image.Image) -> str:
         return pytesseract.image_to_string(image)
     except Exception:
         return ""
-
-
-def parse_invoice_from_qr(qr_text: str):
-    if not qr_text:
-        return None
-    try:
-        data = json.loads(qr_text)
-    except Exception:
-        return None
-
-    kdv_orani = 0
-    kdv_tutari_val = 0
-    for key, value in data.items():
-        key_s = str(key).lower()
-        if "kdvmatrah(" in key_s and ")" in key_s:
-            try:
-                kdv_orani = normalize_amount(key_s.split("kdvmatrah(")[1].split(")")[0])
-            except Exception:
-                pass
-        if "hesaplanankdv(" in key_s:
-            kdv_tutari_val = normalize_amount(value)
-
-    return {
-        "Firma Adı": "",
-        "Evrak Tipi": "Fatura",
-        "Tutar": normalize_amount(data.get("odenecek", data.get("vergidahil", 0))),
-        "Vade": normalize_date(data.get("tarih", "")),
-        "Açıklama": f"QR senaryo: {data.get('senaryo', '')} / tip: {data.get('tip', '')}".strip(" /"),
-        "Evrak No": str(data.get("no", "")).strip(),
-        "Döviz": normalize_currency(data.get("parabirimi", "TL")),
-        "Vergi Kimlik No": str(data.get("avkntckn", "") or data.get("vknckn", "")).strip(),
-        "Ara Toplam": normalize_amount(data.get("malhizmettoplam", 0)),
-        "KDV Oranı": kdv_orani,
-        "KDV Tutarı": kdv_tutari_val,
-        "Durum": "Beklemede",
-    }
-
-
-def merge_invoice_data(primary: dict | None, secondary: dict | None) -> dict:
-    merged = dict(secondary or {})
-    for k, v in (primary or {}).items():
-        if v not in (None, "", 0, 0.0, [], {}):
-            merged[k] = v
-    return merged
-
-
-def run_invoice_extraction(image: Image.Image | None = None, ocr_text: str = "", qr_list: list[str] | None = None):
-    qr_list = qr_list or []
-    qr_result = None
-    for qr in qr_list:
-        qr_result = parse_invoice_from_qr(qr)
-        if qr_result:
-            break
-
-    ai_result = None
-    if image is not None:
-        ai_result = analyze_invoice(image, ocr_text=ocr_text, qr_list=qr_list)
-    elif ocr_text.strip():
-        ai_result = analyze_invoice_text_only(ocr_text, qr_list=qr_list)
-
-    if qr_result and ai_result:
-        return merge_invoice_data(ai_result, qr_result)
-    if qr_result:
-        return qr_result
-    return ai_result
 
 def analyze_invoice(image: Image.Image, ocr_text: str = "", qr_list: list[str] | None = None):
     qr_list = qr_list or []
@@ -1541,17 +1490,18 @@ elif menu == "İşlem Merkezi":
             if scan_file and st.button("🧠 Tara & çıkar", use_container_width=True, key="btn_scan"):
                 raw_image = None
                 ocr_text = ""
-                source_name = getattr(scan_file, "name", "")
 
                 if scan_file.type == "application/pdf":
                     pdf_bytes = scan_file.read()
 
+                    # 1) Eğer pdf2image varsa ilk sayfayı görsele çevir
                     if PDF_ENABLED:
                         try:
                             raw_image = pdf_first_page_to_image(pdf_bytes, dpi=350)
                         except Exception as e:
                             st.error(f"PDF görsele çevrilemedi: {e}")
 
+                    # 2) pdf2image yoksa en azından metin çekmeye çalış (OCR/AI için)
                     if raw_image is None:
                         try:
                             import PyPDF2
@@ -1572,52 +1522,56 @@ elif menu == "İşlem Merkezi":
                     except Exception as e:
                         st.error(f"Görsel açılamadı: {e}")
 
-                image = enhance_for_reading(raw_image) if raw_image is not None else None
-                qr_list = []
                 if raw_image is not None:
+                    image = enhance_for_reading(raw_image)
                     qr_list = decode_qr_opencv(raw_image) or decode_qr_opencv(image)
-                if qr_list:
-                    st.success("✅ QR bulundu, öncelikle QR verisi kullanılacak.")
-                    st.code(qr_list[0], language="json")
+                    if do_ocr:
+                        with st.spinner("OCR okunuyor..."):
+                            ocr_text = (ocr_text + "\n" + ocr_read(image)).strip()
 
-                if do_ocr and image is not None:
-                    with st.spinner("OCR okunuyor..."):
-                        ocr_text = (ocr_text + "\n" + ocr_read(image)).strip()
+                    with st.spinner("AI alanları çıkarıyor..."):
+                        result = analyze_invoice(image, ocr_text=ocr_text, qr_list=qr_list)
 
-                with st.spinner("Alanlar çıkarılıyor..."):
-                    result = run_invoice_extraction(image=image, ocr_text=ocr_text, qr_list=qr_list)
-
-                if result:
-                    st.success("✅ Alanlar çıkarıldı. Kaydetmeden önce gözden geçir.")
-                    st.session_state["_scan_result"] = result
-                    st.session_state["_scan_image"] = image
-                    st.session_state["_scan_ocr_text"] = ocr_text
-                    st.session_state["_scan_source_name"] = source_name
+                    if result:
+                        st.success("✅ Alanlar çıkarıldı. Kaydetmeden önce gözden geçir.")
+                        st.session_state["_scan_result"] = result
+                        st.session_state["_scan_image"] = image
+                        st.session_state["_scan_ocr_text"] = ocr_text
+                        st.session_state["_scan_source_name"] = getattr(scan_file, "name", "")
+                    else:
+                        st.warning("Tarama başarısız / düşük kalite. Aşağıdan manuel giriş yapabilirsin.")
+                        st.session_state["_scan_result"] = None
+                        st.session_state["_scan_image"] = None
                 else:
-                    st.warning("Tarama başarısız / düşük kalite. Aşağıdan manuel giriş yapabilirsin.")
-                    st.session_state["_scan_result"] = None
-                    st.session_state["_scan_image"] = None
-                    st.session_state["_scan_ocr_text"] = ""
-                    st.session_state["_scan_source_name"] = source_name
+                    # Görsel yok (PDF->image yok) ama metin varsa, metinle dene
+                    if ocr_text.strip():
+                        with st.spinner("AI (metin) alanları çıkarıyor..."):
+                            result = analyze_invoice_text_only(ocr_text, qr_list=[])
+                        if result:
+                            st.success("✅ Alanlar çıkarıldı. Kaydetmeden önce gözden geçir.")
+                            st.session_state["_scan_result"] = result
+                            st.session_state["_scan_image"] = None
+                            st.session_state["_scan_ocr_text"] = ocr_text
+                            st.session_state["_scan_source_name"] = getattr(scan_file, "name", "")
+                        else:
+                            st.warning("Metinden alan çıkarılamadı. Manuel girişe geç.")
+                    else:
+                        st.warning("Tarama için görsel üretilemedi. Manuel girişe geç.")
 
             # Existing quick edit block stays as-is (below)
 
             result = st.session_state.get("_scan_result")
             image = st.session_state.get("_scan_image")
-            scan_ocr_text = st.session_state.get("_scan_ocr_text", "")
-            scan_source_name = st.session_state.get("_scan_source_name", getattr(scan_file, "name", "") if scan_file else "")
             if result:
                 st.divider()
                 st.markdown("<div class='muted'>Kaydetmeden önce bilgileri kontrol et:</div>", unsafe_allow_html=True)
                 edited_result = render_invoice_review_form(result, key_prefix="scan_review")
 
                 if st.button("💾 Sheets'e kaydet", use_container_width=True, key="btn_scan_save"):
-                    new_row = build_invoice_record(edited_result, ocr_text=scan_ocr_text, source_name=scan_source_name)
-                    df2 = df.copy().drop(columns=["Belge_Date"], errors="ignore")
-                    df2 = pd.concat([df2, pd.DataFrame([new_row])], ignore_index=True)
-                    df2 = normalize_sheet(df2)
-
-                    ok, err = save_data(df2)
+                    source_name = st.session_state.get("_scan_source_name", getattr(scan_file, "name", ""))
+                    scan_ocr_text = st.session_state.get("_scan_ocr_text", "")
+                    new_row = build_invoice_record(edited_result, ocr_text=scan_ocr_text, source_name=source_name)
+                    ok, err = save_single_record(new_row)
                     if ok:
                         if archive and image is not None:
                             path = archive_invoice(image)
@@ -1665,11 +1619,7 @@ elif menu == "İşlem Merkezi":
                     "Durum": odeme_durumu,
                     "Açıklama": aciklama,
                 }, source_name="manuel_giris")
-                df2 = df.copy().drop(columns=["Belge_Date"], errors="ignore")
-                df2 = pd.concat([df2, pd.DataFrame([new_row])], ignore_index=True)
-                df2 = normalize_sheet(df2)
-
-                ok, err = save_data(df2)
+                ok, err = save_single_record(new_row)
                 if ok:
                     st.success("Kayıt eklendi.")
                     st.rerun()
@@ -1749,37 +1699,26 @@ elif menu == "AI Evrak Analizi":
 
     if st.button("🧠 AI ile Analiz Et", use_container_width=True):
         with st.spinner("AI analiz ediyor..."):
-            result = run_invoice_extraction(image=image, ocr_text=ocr_text, qr_list=qr_list)
+            result = analyze_invoice(image, ocr_text=ocr_text, qr_list=qr_list)
 
         if not result:
-            st.error("AI/QR veri çıkaramadı. DPI artırmayı (PDF: 400) veya daha net dosya denemeyi deneyin.")
-        else:
-            st.success("Veri çıkarıldı.")
-            st.session_state["_detail_result"] = result
-            st.session_state["_detail_ocr_text"] = ocr_text
-            st.session_state["_detail_source_name"] = getattr(uploaded, "name", "")
+            st.error("AI veri çıkaramadı. DPI artırmayı (PDF: 400) veya daha net dosya denemeyi deneyin.")
+            st.stop()
 
-    detail_result = st.session_state.get("_detail_result")
-    if detail_result:
-        st.json(detail_result)
+        st.success("AI veriyi çıkardı.")
+        st.json(result)
+
         st.subheader("✍️ Kaydetmeden önce düzelt")
-        edited_result = render_invoice_review_form(detail_result, key_prefix="detail_review")
+        edited_result = render_invoice_review_form(result, key_prefix="detail_review")
 
         if st.button("💾 Google Sheets'e Kaydet", use_container_width=True):
-            new_row = build_invoice_record(edited_result, ocr_text=st.session_state.get("_detail_ocr_text", ""), source_name=st.session_state.get("_detail_source_name", getattr(uploaded, "name", "")))
-            df2 = df.copy().drop(columns=["Belge_Date"], errors="ignore")
-            df2 = pd.concat([df2, pd.DataFrame([new_row])], ignore_index=True)
-            df2 = normalize_sheet(df2)
-
-            ok, err = save_data(df2)
+            new_row = build_invoice_record(edited_result, ocr_text=ocr_text, source_name=getattr(uploaded, "name", ""))
+            ok, err = save_single_record(new_row)
             if ok:
                 if archive:
                     path = archive_invoice(image)
                     st.info(f"Arşivlendi: {path}")
                 st.success("Kaydedildi.")
-                st.session_state["_detail_result"] = None
-                st.session_state["_detail_ocr_text"] = ""
-                st.session_state["_detail_source_name"] = ""
                 st.rerun()
             else:
                 st.error(f"Kaydedilemedi: {err}")
