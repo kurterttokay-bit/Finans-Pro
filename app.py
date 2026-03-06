@@ -708,21 +708,49 @@ def save_single_record(record: dict):
         return False, str(e)
 
 def save_many_records(records: list[dict]):
-    """Append many records with a single write, using the same schema as manual save."""
+    """Append many records one by one using the exact same path as manual save.
+    This avoids auth/path differences between manual and bulk writes.
+    """
     try:
         if not records:
             return True, ""
-        current = read_sheet(conn, worksheet=WORKSHEET_NAME)
-        if current is None or current.empty:
-            current = pd.DataFrame(columns=SHEET_COLUMNS)
-        clean_records = [{col: rec.get(col, "") for col in SHEET_COLUMNS} for rec in records]
-        updated = pd.concat([current, pd.DataFrame(clean_records)], ignore_index=True)
-        replace_sheet(conn, updated[SHEET_COLUMNS], worksheet=WORKSHEET_NAME)
+        failures = []
+        for idx, record in enumerate(records, start=1):
+            ok, err = save_single_record(record)
+            if not ok:
+                failures.append(f"{idx}. kayıt: {err}")
+        if failures:
+            return False, " | ".join(failures[:3])
         st.cache_data.clear()
         return True, ""
     except Exception as e:
         logging.exception(e)
         return False, str(e)
+
+
+def run_write_test_record():
+    now = datetime.now()
+    test_record = {
+        "kayit_tarihi": now.strftime("%d.%m.%Y"),
+        "belge_tarihi": now.strftime("%d.%m.%Y"),
+        "firma_adi": "WRITE_TEST",
+        "evrak_tipi": "Test",
+        "evrak_no": f"TEST-{now.strftime('%H%M%S')}",
+        "vergi_kimlik_no": "",
+        "para_birimi": "TL",
+        "ara_toplam": 1,
+        "kdv_orani": 0,
+        "kdv_tutari": 0,
+        "genel_toplam": 1,
+        "kategori": "Test",
+        "odeme_durumu": "Beklemede",
+        "aciklama": "Sheets yazma testi",
+        "ham_metin": "",
+        "kaynak_dosya": "write_test",
+        "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    return save_single_record(test_record)
 
 # -------------------------
 # FX RATES
@@ -1457,6 +1485,13 @@ with st.sidebar:
         st.write("Okunan satır sayısı:", len(df) if df is not None else 0)
         st.write("Kolonlar:", list(df.columns) if df is not None and not df.empty else [])
         st.code(st.session_state.get("_gsheets_last_error", "Yok"))
+        if st.button("🧪 Sheets yazma testi", key="write_test_btn"):
+            ok, err = run_write_test_record()
+            if ok:
+                st.success("Test satırı yazıldı.")
+                st.rerun()
+            else:
+                st.error(f"Yazma testi başarısız: {err}")
 # -------------------------
 # DASHBOARD
 # -------------------------
