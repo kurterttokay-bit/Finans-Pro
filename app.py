@@ -745,11 +745,19 @@ def render_invoice_review_form(result: dict, key_prefix: str = "rev") -> dict:
 def load_data():
     try:
         raw = read_sheet(conn, worksheet=WORKSHEET_NAME)
+        # Bazı kurulumlarda worksheet adı desteklenmeyebilir veya farklı olabilir.
+        if raw is None or raw.empty:
+            raw = read_sheet(conn)
         st.session_state["_gsheets_last_error"] = ""
         return normalize_sheet(raw)
     except Exception as e:
-        st.session_state["_gsheets_last_error"] = str(e)
-        return normalize_sheet(pd.DataFrame(columns=CANON_COLS))
+        try:
+            raw = read_sheet(conn)
+            st.session_state["_gsheets_last_error"] = f"Worksheet fallback kullanıldı: {e}"
+            return normalize_sheet(raw)
+        except Exception as e2:
+            st.session_state["_gsheets_last_error"] = f"{e} | fallback: {e2}"
+            return normalize_sheet(pd.DataFrame(columns=CANON_COLS))
 
 def save_data(df: pd.DataFrame):
     try:
@@ -766,13 +774,22 @@ def save_data(df: pd.DataFrame):
 # -------------------------
 @st.cache_data(ttl=300)
 def get_fx():
-    try:
-        usd = float(yf.download("USDTRY=X", period="1d", progress=False)["Close"].iloc[-1])
-        eur = float(yf.download("EURTRY=X", period="1d", progress=False)["Close"].iloc[-1])
-        return usd, eur
-    except Exception as e:
-        logging.error(e)
-        return 34.90, 37.80
+    def _safe_rate(ticker: str, fallback: float) -> float:
+        try:
+            fx = yf.download(ticker, period="5d", progress=False, auto_adjust=False)
+            if fx is None or fx.empty or "Close" not in fx.columns:
+                return fallback
+            close = fx["Close"].dropna()
+            if close.empty:
+                return fallback
+            return float(close.iloc[-1])
+        except Exception as e:
+            logging.error("FX rate fetch failed for %s: %s", ticker, e)
+            return fallback
+
+    usd = _safe_rate("USDTRY=X", 34.90)
+    eur = _safe_rate("EURTRY=X", 37.80)
+    return usd, eur
 
 def compute_tl(df: pd.DataFrame, usd: float, eur: float) -> pd.DataFrame:
     dfx = df.copy()
@@ -1242,9 +1259,10 @@ if menu == "Dashboard":
             timeline = timeline.merge(proj, on="date", how="left").fillna({"outflow": 0.0})
             timeline["balance"] = float(base_cash) - timeline["outflow"].cumsum()
 
-            bal30 = timeline.loc[timeline["date"] == today + timedelta(days=30), "balance"].iloc[0]
-            bal60 = timeline.loc[timeline["date"] == today + timedelta(days=60), "balance"].iloc[0]
-            bal90 = timeline.loc[timeline["date"] == today + timedelta(days=90), "balance"].iloc[0]
+            balance_map = timeline.set_index("date")["balance"].to_dict()
+            bal30 = float(balance_map.get(today + timedelta(days=30), timeline["balance"].iloc[-1] if not timeline.empty else float(base_cash)))
+            bal60 = float(balance_map.get(today + timedelta(days=60), timeline["balance"].iloc[-1] if not timeline.empty else float(base_cash)))
+            bal90 = float(balance_map.get(today + timedelta(days=90), timeline["balance"].iloc[-1] if not timeline.empty else float(base_cash)))
 
             m1, m2, m3 = st.columns(3)
             m1.metric("30 gün", f"{bal30:,.0f} ₺")
