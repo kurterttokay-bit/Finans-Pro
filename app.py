@@ -1,3 +1,4 @@
+from json_utils import safe_json_loads
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -11,7 +12,6 @@ import plotly.express as px
 import os
 from urllib.parse import urlencode
 from io import BytesIO
-from json_utils import safe_json_loads
 from invoice_normalizers import normalize_amount, normalize_currency, normalize_date
 # -------------------------
 # OPTIONAL LIBS (PDF / OCR)
