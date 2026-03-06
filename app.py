@@ -11,7 +11,8 @@ import plotly.express as px
 import os
 from urllib.parse import urlencode
 from io import BytesIO
-
+from json_utils import safe_json_loads
+from invoice_normalizers import normalize_amount, normalize_currency, normalize_date
 # -------------------------
 # OPTIONAL LIBS (PDF / OCR)
 # -------------------------
@@ -819,22 +820,63 @@ Notlar:
         if not text and getattr(response, "candidates", None):
             text = response.candidates[0].content.parts[0].text
 
-        m = re.search(r"\{.*\}", text, re.S)
-        if not m:
+from json_utils import safe_json_loads
+from invoice_normalizers import normalize_amount, normalize_currency, normalize_date
+
+def analyze_invoice(image, ocr_text="", qr_list=None):
+    qr_list = qr_list or []
+
+    prompt = f"""
+Sen bir finans muhasebe asistanısın. Bu görsel bir fatura / e-fatura olabilir.
+
+ELİNDE QR/ OCR varsa bunları mutlaka kullan:
+QR_VERI: {qr_list}
+OCR_METIN: {ocr_text[:4000]}
+
+Sadece geçerli bir JSON nesnesi döndür.
+Açıklama, markdown, kod bloğu ekleme.
+
+Şema:
+{{
+  "firma_adi": "",
+  "evrak_tipi": "Fatura",
+  "tutar": 0,
+  "vade": "DD.MM.YYYY",
+  "aciklama": "",
+  "evrak_no": "",
+  "doviz": "TL"
+}}
+"""
+
+    try:
+        response, used_model = _generate_with_fallback([prompt, image])
+        text = getattr(response, "text", "") or ""
+        if not text and getattr(response, "candidates", None):
+            text = response.candidates[0].content.parts[0].text
+
+        data = safe_json_loads(text)
+        if not data:
             return None
-        data = json.loads(m.group(0))
+
         return {
             "Firma Adı": str(data.get("firma_adi", "")).strip(),
             "Evrak Tipi": str(data.get("evrak_tipi", "Fatura")).strip() or "Fatura",
-            "Tutar": float(data.get("tutar", 0) or 0),
-            "Vade": str(data.get("vade", "")).strip(),
+            "Banka": "",
+            "Tutar": normalize_amount(data.get("tutar", 0)),
+            "Vade": normalize_date(data.get("vade", "")),
             "Açıklama": str(data.get("aciklama", "")).strip(),
+            "Çeki veren": "",
+            "Cirolu": "",
+            "Asıl borçlu": "",
+            "Kime verildi": "",
             "Evrak No": str(data.get("evrak_no", "")).strip(),
-            "Döviz": str(data.get("doviz", "TL")).strip() or "TL",
+            "Döviz": normalize_currency(data.get("doviz", "TL")),
+            "Durum": "Beklemede"
         }
     except Exception as e:
-        st.error(f"AI hata: {e}")
+        logging.exception(e)
         return None
+
 
 
 def archive_invoice(image: Image.Image) -> str:
