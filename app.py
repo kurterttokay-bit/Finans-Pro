@@ -1064,6 +1064,116 @@ def _build_href(**updates) -> str:
     flat = {k: str(v) for k, v in flat.items() if v is not None and str(v) != ""}
     qs = urlencode(flat)
     return f"?{qs}" if qs else ""
+
+
+def render_scan_center(section_key: str = "scan", title: str = "Tarama → Otomatik Sheets'e ekle", show_bulk: bool = True):
+    card_header(title, badge="AI + OCR", subtitle="PDF/Foto yükle, AI alanları çıkarıp kaydetsin. Olmazsa manuel gir.")
+    types = ["png", "jpg", "jpeg", "pdf"]
+    single_tab, bulk_tab = st.tabs(["Tekli", "Toplu"]) if show_bulk else (st.container(), None)
+
+    with single_tab:
+        scan_file = st.file_uploader(
+            "Evrak yükle (PDF/Resim)",
+            type=types,
+            key=f"{section_key}_single_file"
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            do_ocr = st.checkbox("OCR kullan (varsa)", value=False, disabled=not OCR_ENABLED, key=f"{section_key}_ocr")
+        with c2:
+            archive = st.checkbox("Görseli arşivle", value=True, key=f"{section_key}_archive")
+
+        if scan_file and st.button("🧠 Tara & çıkar", use_container_width=True, key=f"{section_key}_run"):
+            with st.spinner("Evrak işleniyor..."):
+                payload = process_uploaded_invoice(scan_file, do_ocr=do_ocr)
+            st.session_state[f"_{section_key}_payload"] = payload
+
+        payload = st.session_state.get(f"_{section_key}_payload")
+        if payload and payload.get("source_name") == getattr(scan_file, "name", None):
+            result = payload.get("result")
+            image = payload.get("image")
+            raw_image = payload.get("raw_image")
+            ocr_text = payload.get("ocr_text", "")
+            qr_list = payload.get("qr_list", [])
+            if raw_image is not None or image is not None:
+                c1, c2 = st.columns(2)
+                with c1:
+                    if raw_image is not None:
+                        st.image(raw_image, caption="Orijinal", use_container_width=True)
+                with c2:
+                    if image is not None:
+                        st.image(image, caption="İyileştirilmiş", use_container_width=True)
+            if qr_list:
+                st.success("✅ QR bulundu")
+                st.code(qr_list[0])
+            if ocr_text.strip():
+                with st.expander("OCR / PDF Metni", expanded=False):
+                    st.text_area("Ham metin", ocr_text, height=180, key=f"{section_key}_ocr_view")
+            if not result:
+                st.warning("Tarama başarısız / düşük kalite. Aşağıdan manuel giriş yapabilirsin.")
+                if payload.get("error"):
+                    st.caption(payload.get("error"))
+            else:
+                st.success("✅ Alanlar çıkarıldı. Kaydetmeden önce gözden geçir.")
+                edited_result = render_invoice_review_form(result, key_prefix=f"{section_key}_review")
+                if st.button("💾 Sheets'e kaydet", use_container_width=True, key=f"{section_key}_save"):
+                    new_row = build_invoice_record(edited_result, ocr_text=ocr_text, source_name=payload.get("source_name", ""))
+                    ok, err = save_single_record(new_row)
+                    if ok:
+                        if archive and image is not None:
+                            path = archive_invoice(image)
+                            st.info(f"Arşivlendi: {path}")
+                        st.success("Kaydedildi.")
+                        st.session_state.pop(f"_{section_key}_payload", None)
+                        st.rerun()
+                    else:
+                        st.error(f"Kaydedilemedi: {err}")
+
+    if show_bulk and bulk_tab is not None:
+        with bulk_tab:
+            bulk_files = st.file_uploader(
+                "Birden fazla PDF / görsel seç",
+                type=types,
+                accept_multiple_files=True,
+                key=f"{section_key}_bulk_files"
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                bulk_ocr = st.checkbox("Toplu işlemde OCR kullan", value=False, disabled=not OCR_ENABLED, key=f"{section_key}_bulk_ocr")
+            with c2:
+                bulk_archive = st.checkbox("Toplu işlemde görselleri arşivle", value=False, key=f"{section_key}_bulk_archive")
+            if bulk_files:
+                st.caption(f"Seçilen dosya: {len(bulk_files)}")
+            if bulk_files and st.button("📦 Toplu tara ve kaydet", use_container_width=True, key=f"{section_key}_bulk_run"):
+                rows = []
+                success_count = 0
+                fail_count = 0
+                progress = st.progress(0)
+                for i, uf in enumerate(bulk_files, start=1):
+                    payload = process_uploaded_invoice(uf, do_ocr=bulk_ocr)
+                    result = payload.get("result")
+                    if result:
+                        row = build_invoice_record(result, ocr_text=payload.get("ocr_text", ""), source_name=payload.get("source_name", ""))
+                        ok, err = save_single_record(row)
+                        if ok:
+                            success_count += 1
+                            if bulk_archive and payload.get("image") is not None:
+                                try:
+                                    archive_invoice(payload.get("image"))
+                                except Exception:
+                                    pass
+                            rows.append({"dosya": payload.get("source_name", ""), "durum": "Kaydedildi", "firma": row.get("firma_adi", ""), "tutar": row.get("genel_toplam", 0), "tarih": row.get("belge_tarihi", ""), "mesaj": ""})
+                        else:
+                            fail_count += 1
+                            rows.append({"dosya": payload.get("source_name", ""), "durum": "Kaydedilemedi", "firma": "", "tutar": "", "tarih": "", "mesaj": err})
+                    else:
+                        fail_count += 1
+                        rows.append({"dosya": payload.get("source_name", ""), "durum": "Çözümlenemedi", "firma": "", "tutar": "", "tarih": "", "mesaj": payload.get("error", "Veri çıkarılamadı")})
+                    progress.progress(i / max(len(bulk_files), 1))
+                st.success(f"Toplu işlem bitti. Başarılı: {success_count} · Hatalı: {fail_count}")
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, height=320)
+
 # -------------------------
 # SIDEBAR (menu + settings)
 # -------------------------
@@ -1090,7 +1200,7 @@ with st.sidebar:
         st.markdown(f"**Kullanıcı:** Kurter  \\n**Yetki:** {ROLE}")
     menu = st.radio(
         "",
-        ["Dashboard", "İşlem Merkezi", "AI Evrak Analizi", "AI CFO Chat"],
+        ["Dashboard", "Hızlı Tarama", "İşlem Merkezi", "AI Evrak Analizi", "AI CFO Chat"],
         label_visibility="collapsed",
         key="menu_radio",
     )
@@ -1287,6 +1397,12 @@ VERİ:
 # -------------------------
 # İŞLEM MERKEZİ (4 kutu)
 # -------------------------
+elif menu == "Hızlı Tarama":
+    st.title("⚡ Hızlı Tarama")
+    st.markdown("<div class='muted'>En sık kullanılan akış: PDF / foto yükle, tekli veya toplu şekilde doğrudan Sheets'e ekle.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='accent-line'></div>", unsafe_allow_html=True)
+    render_scan_center(section_key="sidebar_scan", title="Hızlı Tarama → Otomatik Sheets'e ekle", show_bulk=True)
+
 elif menu == "İşlem Merkezi":
     # --- Hero header ---
     st.markdown(
