@@ -1,6 +1,5 @@
 from json_utils import safe_json_loads
 import streamlit as st
-from ai_extract import analyze_invoice, analyze_invoice_text_only
 import pandas as pd
 import yfinance as yf
 import google.generativeai as genai
@@ -14,9 +13,6 @@ import os
 from urllib.parse import urlencode
 from io import BytesIO
 from invoice_normalizers import normalize_amount, normalize_currency, normalize_date
-from ocr_utils import ...
-from record_builder import build_invoice_record
-from sheet_ops import ...
 # -------------------------
 # OPTIONAL LIBS (PDF / OCR)
 # -------------------------
