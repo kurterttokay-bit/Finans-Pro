@@ -1639,10 +1639,9 @@ elif menu == "AI Evrak Analizi":
     if PDF_ENABLED:
         types.append("pdf")
 
-    uploaded = st.file_uploader("Fatura yükle", type=types)
-    if not uploaded:
-        st.info("Bir fatura yükleyin (PDF veya resim).")
-        st.stop()
+    uploaded = st.file_uploader(
+    "Fatura yükle",
+        type=["png", "jpg", "jpeg", "pdf"]
 
     raw_image = None
     if uploaded.type == "application/pdf":
