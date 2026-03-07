@@ -2162,3 +2162,20 @@ VERİ (ilk 120 kayıt):
             except Exception as e:
                 st.error(f"AI hata: {e}")
     st.markdown("</div>", unsafe_allow_html=True)
+# -------------------------
+# ROUTER
+# -------------------------
+
+if st.session_state.page == "home":
+    home_page()
+
+elif st.session_state.page == "invoice":
+    invoice_tool()
+
+elif st.session_state.page == "earsiv":
+    st.title("E-Arşiv Parser")
+    st.info("yakında...")
+
+elif st.session_state.page == "fx":
+    st.title("Kur Analizi")
+    st.info("yakında...")
