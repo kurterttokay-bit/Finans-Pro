@@ -1157,6 +1157,7 @@ def merge_invoice_data(primary: dict | None, secondary: dict | None) -> dict:
         if v not in (None, "", 0, 0.0, []):
             merged[k] = v
     return merged
+
 def extract_pdf_text(pdf_bytes: bytes) -> str:
     try:
         import PyPDF2
@@ -1171,60 +1172,110 @@ def extract_pdf_text(pdf_bytes: bytes) -> str:
         logging.warning("PDF text extraction failed: %s", e)
         return ""
 
+def _clean_ocr_text(text: str) -> str:
+    text = str(text or "").replace("\r", "\n")
+    text = re.sub(r"[ \t\xa0]+", " ", text)
+    text = re.sub(r"\n{2,}", "\n", text)
+    return text.strip()
+
+def _crop_rel(img: Image.Image, box: tuple[float, float, float, float], pad: float = 0.015) -> Image.Image:
+    w, h = img.size
+    x1, y1, x2, y2 = box
+    px = int(w * pad)
+    py = int(h * pad)
+    left = max(0, int(x1 * w) - px)
+    top = max(0, int(y1 * h) - py)
+    right = min(w, int(x2 * w) + px)
+    bottom = min(h, int(y2 * h) + py)
+    return img.crop((left, top, right, bottom))
+
+def _invoice_region_boxes() -> dict:
+    return {
+        "seller": (0.02, 0.14, 0.48, 0.35),
+        "buyer":  (0.02, 0.30, 0.48, 0.56),
+        "meta":   (0.64, 0.02, 0.98, 0.38),
+        "table":  (0.02, 0.40, 0.98, 0.70),
+        "totals": (0.50, 0.63, 0.98, 0.81),
+        "notes":  (0.02, 0.77, 0.98, 0.97),
+    }
+
+def extract_invoice_region_images(img: Image.Image, pad: float = 0.02) -> dict:
+    return {name: _crop_rel(img, box, pad=pad) for name, box in _invoice_region_boxes().items()}
+
+def extract_invoice_region_texts(img: Image.Image) -> dict:
+    regions = extract_invoice_region_images(img, pad=0.02)
+    texts = {}
+    for name, region in regions.items():
+        txt = ocr_read(enhance_for_reading(region))
+        texts[name] = _clean_ocr_text(txt)
+    return texts
+
+def _first_match(text: str, patterns: list[str]) -> str:
+    for pat in patterns:
+        m = re.search(pat, text, re.I | re.S)
+        if m:
+            return m.group(1).strip(" :-\n\t")
+    return ""
+
+def _extract_label_amount(text: str, labels: list[str]) -> float:
+    if not text:
+        return 0.0
+    joined = "|".join(labels)
+    patterns = [
+        rf"(?:{joined})\s*[:\-]?\s*([0-9][0-9\.,]+)",
+        rf"(?:{joined})[^0-9]{{0,25}}([0-9][0-9\.,]+)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, re.I | re.S)
+        if m:
+            return normalize_amount(m.group(1))
+    return 0.0
+
+def _extract_party_name(block: str, stop_words: list[str]) -> str:
+    if not block:
+        return ""
+    lines = [ln.strip(" .:-") for ln in block.splitlines() if ln.strip()]
+    for ln in lines:
+        low = ln.lower()
+        if any(sw in low for sw in stop_words):
+            continue
+        if re.search(r"\b(vkn|tckn|tel|faks|web|eposta|e-posta|vergi|mersis|ticaret)\b", low, re.I):
+            continue
+        if len(ln) >= 3:
+            return ln[:140]
+    return ""
+
 def parse_invoice_from_text(text: str) -> dict | None:
     if not text or not text.strip():
         return None
-    s = str(text)
-    compact = re.sub(r"[ \t\xa0]+", " ", s).replace("\r", "")
+    s = _clean_ocr_text(text)
+    compact = s
 
-    def m1(patterns):
-        for pat in patterns:
-            m = re.search(pat, compact, re.I | re.S)
-            if m:
-                return m.group(1).strip(" :-\n\t")
-        return ""
-
-    firma = m1([
-        r"(?:UNVAN|SATI[ÇC]I|SATICI|FIRMA|FİRMA)\s*[:\-]?\s*([^\n]{3,120})",
-        r"(?:VKN|VERG[İI]\s*K[İI]ML[İI]K\s*NO)\s*[:\-]?\s*\d{10,11}\s+([^\n]{3,120})",
+    firma = _first_match(compact, [
+        r"(?:UNVAN|SATI[ÇC]I|SATICI|FIRMA|FİRMA)\s*[:\-]?\s*([^\n]{3,140})",
+        r"(?:SAYIN)\s*\n?([^\n]{3,140})",
     ])
     if not firma:
-        for line in [ln.strip() for ln in s.splitlines() if ln.strip()]:
-            if len(line) > 6 and not re.search(r"fatura|invoice|sayfa|page|vkn|verg", line, re.I):
-                firma = line[:120]
-                break
+        firma = _extract_party_name(s, stop_words=["sayin", "e-fatura", "fatura no", "fatura tarihi"])
 
-    evrak_no = m1([
-        r"(?:FATURA\s*NO|FATURA\s*NUMARASI|BELGE\s*NO|NO)\s*[:\-]?\s*([A-Z0-9\-/]{6,30})",
+    evrak_no = _first_match(compact, [
+        r"FATURA\s*NO\s*[:\-]?\s*([A-Z0-9\-/]{6,40})",
+        r"(?:BELGE\s*NO|NO)\s*[:\-]?\s*([A-Z0-9\-/]{6,40})",
         r"\b([A-Z]{2,6}20\d{2}[A-Z0-9\-]{4,24})\b",
     ])
-    belge_tarihi = m1([
-        r"(?:FATURA\s*TAR[İI]H[İI]|TAR[İI]H)\s*[:\-]?\s*(\d{2}[./-]\d{2}[./-]\d{4})",
+
+    belge_tarihi = _first_match(compact, [
+        r"FATURA\s*TAR[İI]H[İI]\s*[:\-]?\s*(\d{2}[./-]\d{2}[./-]\d{4})",
+        r"TAR[İI]H\s*[:\-]?\s*(\d{2}[./-]\d{2}[./-]\d{4})",
         r"\b(20\d{2}[./-]\d{2}[./-]\d{2})\b",
     ])
-    vkn = m1([r"(?:VKN|VERG[İI]\s*K[İI]ML[İI]K\s*NO|TCKN)\s*[:\-]?\s*(\d{10,11})"])
 
-    def all_amounts(patterns):
-        vals = []
-        for pat in patterns:
-            for m in re.finditer(pat, compact, re.I | re.S):
-                vals.append(normalize_amount(m.group(1)))
-        return [v for v in vals if v and v > 0]
+    vkn = _first_match(compact, [r"(?:VKN|VERG[İI]\s*K[İI]ML[İI]K\s*NO|TCKN)\s*[:\-]?\s*(\d{10,11})"])
+    ara_toplam = _extract_label_amount(compact, ["ARA\s*TOPLAM", "MAL\s*/?\s*H[İI]ZMET\s*TOPLAM", "MALH[İI]ZMETTOPLAM", "MAL\s*H[İI]ZMET\s*TOPLAM\s*TUTARI"])
+    kdv_tutari = _extract_label_amount(compact, ["HESAPLANAN\s*KDV", "KDV\s*TUTARI", "TOPLAM\s*KDV"])
+    genel_toplam = _extract_label_amount(compact, ["ÖDENECEK\s*TUTAR", "ODENECEK\s*TUTAR", "VERG[İI]\s*DAH[İI]L\s*TOPLAM\s*TUTAR", "GENEL\s*TOPLAM", "TOPLAM\s*TUTAR"])
+    kdv_oran = _first_match(compact, [r"KDV\s*(?:ORANI|ORAN)\s*[:\-]?\s*%?\s*(\d{1,2})", r"%\s*(\d{1,2})\s*KDV"])
 
-    genel_vals = all_amounts([r"(?:GENEL\s*TOPLAM|TOPLAM\s*TUTAR|ÖDENECEK\s*TUTAR|ODENECEK\s*TUTAR|VERG[İI]\s*DAH[İI]L)\s*[:\-]?\s*([0-9.,]+)"])
-    ara_vals = all_amounts([r"(?:ARA\s*TOPLAM|MAL\s*H[İI]ZMET\s*TOPLAM|MALH[İI]ZMETTOPLAM|MATRAH)\s*[:\-]?\s*([0-9.,]+)"])
-    kdv_vals = all_amounts([r"(?:HESAPLANAN\s*KDV|KDV\s*TUTARI|TOPLAM\s*KDV)\s*[:\-]?\s*([0-9.,]+)"])
-    kdv_oran = m1([r"KDV\s*(?:ORANI|ORAN)\s*[:\-]?\s*%?\s*(\d{1,2})", r"%\s*(\d{1,2})\s*KDV"])
-
-    para = "TL"
-    if re.search(r"\bUSD\b|\$", compact, re.I):
-        para = "USD"
-    elif re.search(r"\bEUR\b|€", compact, re.I):
-        para = "EUR"
-
-    ara_toplam = ara_vals[0] if ara_vals else 0
-    kdv_tutari = kdv_vals[0] if kdv_vals else 0
-    genel_toplam = genel_vals[0] if genel_vals else 0
     if not genel_toplam and ara_toplam and kdv_tutari:
         genel_toplam = ara_toplam + kdv_tutari
     if not ara_toplam and genel_toplam and kdv_tutari:
@@ -1236,6 +1287,12 @@ def parse_invoice_from_text(text: str) -> dict | None:
             kdv_oran = round((kdv_tutari / ara_toplam) * 100)
         except Exception:
             kdv_oran = 0
+
+    para = "TL"
+    if re.search(r"\bUSD\b|\$", compact, re.I):
+        para = "USD"
+    elif re.search(r"\bEUR\b|€", compact, re.I):
+        para = "EUR"
 
     result = {
         "Firma Adı": firma,
@@ -1254,78 +1311,217 @@ def parse_invoice_from_text(text: str) -> dict | None:
     useful = [result.get("Firma Adı"), result.get("Evrak No"), result.get("Vergi Kimlik No"), result.get("Tutar")]
     return result if any(v not in ("", 0, 0.0, None) for v in useful) else None
 
+def parse_invoice_from_regions(region_texts: dict, full_text: str = "") -> dict | None:
+    seller_text = _clean_ocr_text(region_texts.get("seller", ""))
+    buyer_text = _clean_ocr_text(region_texts.get("buyer", ""))
+    meta_text = _clean_ocr_text(region_texts.get("meta", ""))
+    table_text = _clean_ocr_text(region_texts.get("table", ""))
+    totals_text = _clean_ocr_text(region_texts.get("totals", ""))
+    notes_text = _clean_ocr_text(region_texts.get("notes", ""))
+    all_text = "\n".join([seller_text, buyer_text, meta_text, table_text, totals_text, notes_text, _clean_ocr_text(full_text)])
+
+    firma = _extract_party_name(seller_text, stop_words=["sayin", "e-fatura", "ozellestirme", "senaryo", "fatura no", "fatura tarihi"])
+    if not firma:
+        firma = _extract_party_name(all_text, stop_words=["sayin", "e-fatura", "ozellestirme", "senaryo", "fatura no", "fatura tarihi"])
+
+    buyer = _extract_party_name(buyer_text, stop_words=["e-posta", "tel", "vergi", "vkn", "sayin"])
+    if not buyer:
+        m_buyer = re.search(r"SAYIN\s*\n?([^\n]{3,140})", buyer_text + "\n" + all_text, re.I)
+        if m_buyer:
+            buyer = m_buyer.group(1).strip()
+
+    evrak_no = _first_match(meta_text + "\n" + all_text, [
+        r"FATURA\s*NO\s*[:\-]?\s*([A-Z0-9\-/]{6,40})",
+        r"\b([A-Z]{2,6}20\d{2}[A-Z0-9\-]{4,24})\b",
+    ])
+    belge_tarihi = _first_match(meta_text + "\n" + all_text, [
+        r"FATURA\s*TAR[İI]H[İI]\s*[:\-]?\s*(\d{2}[./-]\d{2}[./-]\d{4})",
+        r"TAR[İI]H\s*[:\-]?\s*(\d{2}[./-]\d{2}[./-]\d{4})",
+    ])
+    order_no = _first_match(meta_text + "\n" + notes_text, [r"S[İI]PAR[İI][ŞS]\s*NO\s*[:\-]?\s*([A-Z0-9\-/]{6,40})"])
+
+    seller_vkn = _first_match(seller_text, [r"(?:VKN|VERG[İI]\s*K[İI]ML[İI]K\s*NO|TCKN)\s*[:\-]?\s*(\d{10,11})"])
+    buyer_vkn = _first_match(buyer_text, [r"(?:VKN|VERG[İI]\s*K[İI]ML[İI]K\s*NO|TCKN)\s*[:\-]?\s*(\d{10,11})"])
+    vkn = buyer_vkn or seller_vkn
+
+    ara_toplam = _extract_label_amount(totals_text + "\n" + all_text, ["MAL\s*/?\s*H[İI]ZMET\s*TOPLAM\s*TUTAR[Iİ]", "MAL\s*/?\s*H[İI]ZMET\s*TOPLAM", "ARA\s*TOPLAM"])
+    kdv_tutari = _extract_label_amount(totals_text + "\n" + all_text, ["HESAPLANAN\s*KDV", "KDV\(%?\s*\d+[\.,]?\d*\)", "KDV\s*TUTARI"])
+    genel_toplam = _extract_label_amount(totals_text + "\n" + all_text, ["ÖDENECEK\s*TUTAR", "VERG[İI]LER\s*DAH[İI]L\s*TOPLAM\s*TUTAR", "GENEL\s*TOPLAM"])
+    kdv_oran = _first_match(totals_text + "\n" + table_text + "\n" + all_text, [r"KDV\s*(?:ORANI|ORAN)\s*[:\-]?\s*%?\s*(\d{1,2})", r"%\s*(\d{1,2})\s*,?\d*\s*TL", r"%\s*(\d{1,2})\b"])
+
+    if not genel_toplam and ara_toplam and kdv_tutari:
+        genel_toplam = ara_toplam + kdv_tutari
+    if not ara_toplam and genel_toplam and kdv_tutari:
+        ara_toplam = max(genel_toplam - kdv_tutari, 0)
+    if not kdv_tutari and ara_toplam and genel_toplam:
+        kdv_tutari = max(genel_toplam - ara_toplam, 0)
+    if not kdv_oran and ara_toplam and kdv_tutari:
+        try:
+            kdv_oran = round((kdv_tutari / ara_toplam) * 100)
+        except Exception:
+            kdv_oran = 0
+
+    para = "TL"
+    if re.search(r"\bUSD\b|\$", all_text, re.I):
+        para = "USD"
+    elif re.search(r"\bEUR\b|€", all_text, re.I):
+        para = "EUR"
+
+    line_desc = ""
+    for ln in [ln.strip() for ln in table_text.splitlines() if ln.strip()]:
+        low = ln.lower()
+        if re.search(r"s[ıi]ra|barkod|malzeme|miktar|birim|iskonto|kdv|hizmet tutar", low):
+            continue
+        if len(ln) > 8 and not re.fullmatch(r"[0-9\.,% TLtladetADet-]+", ln):
+            line_desc = ln[:180]
+            break
+
+    aciklama_parts = []
+    if order_no:
+        aciklama_parts.append(f"Sipariş No: {order_no}")
+    if buyer:
+        aciklama_parts.append(f"Alıcı: {buyer}")
+    if line_desc:
+        aciklama_parts.append(f"Ürün: {line_desc}")
+    aciklama = " | ".join(aciklama_parts)[:220]
+
+    result = {
+        "Firma Adı": firma,
+        "Evrak Tipi": "e-Fatura" if re.search(r"e-?fatura", all_text, re.I) else "Fatura",
+        "Tutar": genel_toplam,
+        "Vade": normalize_date(belge_tarihi),
+        "Açıklama": aciklama,
+        "Evrak No": evrak_no,
+        "Döviz": normalize_currency(para),
+        "Vergi Kimlik No": vkn,
+        "Ara Toplam": ara_toplam,
+        "KDV Oranı": normalize_amount(kdv_oran or 0),
+        "KDV Tutarı": kdv_tutari,
+        "Durum": "Beklemede",
+        "Alıcı": buyer,
+    }
+    useful = [result.get("Firma Adı"), result.get("Evrak No"), result.get("Tutar"), result.get("Vade")]
+    return result if any(v not in ("", 0, 0.0, None) for v in useful) else None
+
 def sanitize_bulk_result(result: dict | None, raw_text: str = "") -> dict | None:
     if not result:
         return None
-
     out = dict(result)
-
     firma = str(out.get("Firma Adı", "") or out.get("firma_adi", "")).strip()
     evrak_no = str(out.get("Evrak No", "") or out.get("evrak_no", "")).strip()
     aciklama = str(out.get("Açıklama", "") or out.get("aciklama", "")).strip()
-
     try:
         tutar = float(normalize_amount(out.get("Tutar", out.get("genel_toplam", 0))))
     except Exception:
         tutar = 0.0
 
-    suspicious_description = (
-        len(aciklama) > 120
-        or "\n" in aciklama
-        or aciklama.lower().count("fatura") >= 2
-        or aciklama.lower().count("toplam") >= 2
-        or aciklama.lower().count("kdv") >= 2
-        or "vergi" in aciklama.lower()
-    )
-
-    weak_core_fields = (
-        not firma
-        or not evrak_no
-        or tutar <= 0
-    )
-
-    # Açıklama alanı OCR dökümüne dönmüşse asla olduğu gibi kaydetme.
+    suspicious_description = len(aciklama) > 140 or "\n" in aciklama or aciklama.lower().count("fatura") >= 2 or aciklama.lower().count("kdv") >= 2
     if suspicious_description:
         out["Açıklama"] = ""
         out["aciklama"] = ""
 
-    # Ana alanlar da zayıfsa text parser ile tekrar dene; yine kötü ise kaydetme.
-    if suspicious_description and weak_core_fields:
-        text_result = parse_invoice_from_text(raw_text or "")
-        if text_result:
-            merged = merge_invoice_data(text_result, out)
-            firma2 = str(merged.get("Firma Adı", "") or merged.get("firma_adi", "")).strip()
-            evrak_no2 = str(merged.get("Evrak No", "") or merged.get("evrak_no", "")).strip()
+    if not firma and raw_text:
+        retry = parse_invoice_from_text(raw_text)
+        if retry and (retry.get("Firma Adı") or retry.get("Evrak No") or retry.get("Tutar")):
+            out = merge_invoice_data(retry, out)
+            firma = str(out.get("Firma Adı", "") or out.get("firma_adi", "")).strip()
+            evrak_no = str(out.get("Evrak No", "") or out.get("evrak_no", "")).strip()
             try:
-                tutar2 = float(normalize_amount(merged.get("Tutar", merged.get("genel_toplam", 0))))
+                tutar = float(normalize_amount(out.get("Tutar", out.get("genel_toplam", 0))))
             except Exception:
-                tutar2 = 0.0
+                tutar = 0.0
 
-            merged["Açıklama"] = ""
-            merged["aciklama"] = ""
-
-            if firma2 and evrak_no2 and tutar2 > 0:
-                return merged
-
+    if not firma and not evrak_no and tutar <= 0:
         return None
 
-    # Ana alanlar tek başına da çok zayıfsa kaydetme.
-    if not firma or tutar <= 0:
-        return None
-
-    # Açıklama kısa ve temiz değilse boş bırak.
-    aciklama2 = str(out.get("Açıklama", "") or out.get("aciklama", "")).strip()
-    if len(aciklama2) > 80:
+    if len(str(out.get("Açıklama", "") or out.get("aciklama", "")).strip()) > 80:
         out["Açıklama"] = ""
         out["aciklama"] = ""
-
     return out
+
+def _needs_ai_fallback(result: dict | None) -> bool:
+    if not result:
+        return True
+    firma = str(result.get("Firma Adı", "") or result.get("firma_adi", "")).strip()
+    evrak_no = str(result.get("Evrak No", "") or result.get("evrak_no", "")).strip()
+    try:
+        tutar = float(normalize_amount(result.get("Tutar", result.get("genel_toplam", 0))))
+    except Exception:
+        tutar = 0.0
+    tarih = str(result.get("Vade", result.get("belge_tarihi", ""))).strip()
+    score = sum([1 if firma else 0, 1 if evrak_no else 0, 1 if tutar > 0 else 0, 1 if tarih else 0])
+    return score < 3
+
+def analyze_invoice_layout(image: Image.Image, region_texts: dict, merged_hint: dict | None = None, qr_list: list[str] | None = None, full_text: str = ""):
+    qr_list = qr_list or []
+    merged_hint = merged_hint or {}
+    prompt = f"""
+Sen Türkiye'deki e-Arşiv / e-Fatura düzenlerine hakim bir muhasebe asistanısın.
+Aşağıdaki metinler faturanın BELİRLİ BÖLGELERİNDEN geldi:
+- seller: sol üst satıcı alanı
+- buyer: satıcının altındaki SAYIN/alıcı alanı
+- meta: sağ üst QR altı fatura bilgileri
+- table: orta ürün tablosu
+- totals: sağ alt toplam/kdv/ödenecek alanı
+- notes: alt açıklamalar alanı
+
+QR_VERI: {qr_list}
+REGION_TEXTS: {json.dumps(region_texts, ensure_ascii=False)[:8000]}
+MEVCUT_BULGULAR: {json.dumps(merged_hint, ensure_ascii=False)[:2000]}
+FULL_TEXT: {full_text[:3000]}
+
+Kurallar:
+- Önce region metinlerine güven, sonra QR, en son full text.
+- Tahmin uydurma.
+- Açıklama alanını kısa tut; tüm OCR metnini yazma.
+- Firma Adı satıcıdır, alıcı değildir.
+- Vade alanına fatura tarihini yaz.
+- Tutar KDV dahil ödenecek tutardır.
+
+Sadece geçerli JSON döndür:
+{
+  "firma_adi": "",
+  "evrak_tipi": "Fatura",
+  "tutar": 0,
+  "vade": "DD.MM.YYYY",
+  "aciklama": "",
+  "evrak_no": "",
+  "doviz": "TL",
+  "vergi_kimlik_no": "",
+  "ara_toplam": 0,
+  "kdv_orani": 0,
+  "kdv_tutari": 0
+}
+"""
+    try:
+        response, _ = _generate_with_fallback([prompt])
+        data = safe_json_loads(extract_response_text(response))
+        if not data:
+            return None
+        return {
+            "Firma Adı": str(data.get("firma_adi", "")).strip(),
+            "Evrak Tipi": str(data.get("evrak_tipi", "Fatura")).strip() or "Fatura",
+            "Tutar": normalize_amount(data.get("tutar", 0)),
+            "Vade": normalize_date(data.get("vade", "")),
+            "Açıklama": str(data.get("aciklama", "")).strip()[:220],
+            "Evrak No": str(data.get("evrak_no", "")).strip(),
+            "Döviz": normalize_currency(data.get("doviz", "TL")),
+            "Vergi Kimlik No": str(data.get("vergi_kimlik_no", "")).strip(),
+            "Ara Toplam": normalize_amount(data.get("ara_toplam", 0)),
+            "KDV Oranı": normalize_amount(data.get("kdv_orani", 0)),
+            "KDV Tutarı": normalize_amount(data.get("kdv_tutari", 0)),
+            "Durum": "Beklemede",
+        }
+    except Exception:
+        logging.exception("Layout AI fallback failed")
+        return None
 
 def process_uploaded_invoice_bytes(file_bytes: bytes, source_name: str = "", file_type: str = "", do_ocr: bool = False) -> dict:
     raw_image = None
     image = None
     ocr_text = ""
     qr_list = []
+    region_texts = {}
     try:
         is_pdf = (file_type == "application/pdf") or source_name.lower().endswith(".pdf")
         if is_pdf:
@@ -1340,19 +1536,25 @@ def process_uploaded_invoice_bytes(file_bytes: bytes, source_name: str = "", fil
 
         qr_result = None
         text_result = None
+        region_result = None
+
         if raw_image is not None:
             image = enhance_for_reading(raw_image)
             qr_list = decode_qr_opencv(raw_image) or decode_qr_opencv(image) or []
-            if do_ocr:
+            if do_ocr and OCR_ENABLED:
                 try:
-                    ocr_piece = ocr_read(image)
-                    if ocr_piece.strip():
-                        ocr_text = (ocr_text + "\n" + ocr_piece).strip()
+                    region_texts = extract_invoice_region_texts(raw_image)
+                    joined_regions = "\n\n".join([f"[{k}]\n{v}" for k, v in region_texts.items() if v.strip()])
+                    if joined_regions.strip():
+                        ocr_text = (ocr_text + "\n" + joined_regions).strip()
                 except Exception as e:
-                    logging.warning("OCR failed for %s: %s", source_name, e)
-
-        if ocr_text.strip():
-            text_result = parse_invoice_from_text(ocr_text)
+                    logging.warning("Region OCR failed for %s: %s", source_name, e)
+                    try:
+                        ocr_piece = ocr_read(image)
+                        if ocr_piece.strip():
+                            ocr_text = (ocr_text + "\n" + ocr_piece).strip()
+                    except Exception as e2:
+                        logging.warning("Full OCR failed for %s: %s", source_name, e2)
 
         if qr_list:
             for qr in qr_list:
@@ -1360,19 +1562,29 @@ def process_uploaded_invoice_bytes(file_bytes: bytes, source_name: str = "", fil
                 if qr_result:
                     break
 
+        if ocr_text.strip():
+            text_result = parse_invoice_from_text(ocr_text)
+        if region_texts:
+            region_result = parse_invoice_from_regions(region_texts, full_text=ocr_text)
+
+        merged_pre_ai = merge_invoice_data(region_result, merge_invoice_data(text_result, qr_result)) if (region_result or text_result or qr_result) else None
+
         ai_result = None
-        if image is not None:
-            ai_result = analyze_invoice(image, ocr_text=ocr_text, qr_list=qr_list)
-        elif ocr_text.strip():
+        if raw_image is not None and _needs_ai_fallback(merged_pre_ai):
+            ai_result = analyze_invoice_layout(raw_image, region_texts=region_texts, merged_hint=merged_pre_ai, qr_list=qr_list, full_text=ocr_text)
+            if not ai_result:
+                ai_result = analyze_invoice(image, ocr_text=ocr_text, qr_list=qr_list)
+        elif ocr_text.strip() and _needs_ai_fallback(merged_pre_ai):
             ai_result = analyze_invoice_text_only(ocr_text, qr_list=qr_list)
 
-        result = merge_invoice_data(ai_result, merge_invoice_data(text_result, qr_result)) if (ai_result or text_result or qr_result) else None
+        result = merge_invoice_data(ai_result, merged_pre_ai) if (ai_result or merged_pre_ai) else None
         return {
             "source_name": source_name,
             "raw_image": raw_image,
             "image": image,
             "ocr_text": ocr_text,
             "qr_list": qr_list,
+            "region_texts": region_texts,
             "result": result,
             "error": "" if result else "Veri çıkarılamadı",
         }
@@ -1384,6 +1596,7 @@ def process_uploaded_invoice_bytes(file_bytes: bytes, source_name: str = "", fil
             "image": image,
             "ocr_text": ocr_text,
             "qr_list": qr_list,
+            "region_texts": region_texts,
             "result": None,
             "error": str(e),
         }
@@ -1418,13 +1631,19 @@ Açıklama, markdown, kod bloğu ekleme.
   "vade": "DD.MM.YYYY",
   "aciklama": "",
   "evrak_no": "",
-  "doviz": "TL"
+  "doviz": "TL",
+  "vergi_kimlik_no": "",
+  "ara_toplam": 0,
+  "kdv_orani": 0,
+  "kdv_tutari": 0
 }}
 Notlar:
 - vade yoksa fatura tarihini vade olarak yaz.
 - tutarı KDV dahil toplam ödenecek tutar olarak yakala.
 - dövizi bulamazsan TL yaz.
 - evrak_no: fatura no.
+- firma_adi satıcıdır.
+- Açıklama kısa olsun; tüm metni kopyalama.
 - Eğer bir alan bulunamazsa boş string döndür. Tahmin uydurma.
 """
     try:
@@ -1443,20 +1662,24 @@ Notlar:
             "Banka": "",
             "Tutar": normalize_amount(data.get("tutar", 0)),
             "Vade": normalize_date(data.get("vade", "")),
-            "Açıklama": str(data.get("aciklama", "")).strip(),
+            "Açıklama": str(data.get("aciklama", "")).strip()[:220],
             "Çeki veren": "",
             "Cirolu": "",
             "Asıl borçlu": "",
             "Kime verildi": "",
             "Evrak No": str(data.get("evrak_no", "")).strip(),
             "Döviz": normalize_currency(data.get("doviz", "TL")),
+            "Vergi Kimlik No": str(data.get("vergi_kimlik_no", "")).strip(),
+            "Ara Toplam": normalize_amount(data.get("ara_toplam", 0)),
+            "KDV Oranı": normalize_amount(data.get("kdv_orani", 0)),
+            "KDV Tutarı": normalize_amount(data.get("kdv_tutari", 0)),
             "Durum": "Beklemede"
         }
     except Exception as e:
         logging.exception(e)
         return None
+
 def analyze_invoice_text_only(ocr_text: str, qr_list: list[str] | None = None):
-    """Fallback extraction when we can't render a PDF to image."""
     qr_list = qr_list or []
     prompt = f"""
 Sen bir finans muhasebe asistanısın. Elinde sadece metin var (PDF içi metin/OCR).
@@ -1473,13 +1696,19 @@ Açıklama, markdown, kod bloğu ekleme.
   "vade": "DD.MM.YYYY",
   "aciklama": "",
   "evrak_no": "",
-  "doviz": "TL"
+  "doviz": "TL",
+  "vergi_kimlik_no": "",
+  "ara_toplam": 0,
+  "kdv_orani": 0,
+  "kdv_tutari": 0
 }}
 Notlar:
 - vade yoksa fatura tarihini vade olarak yaz.
 - tutarı KDV dahil toplam ödenecek tutar olarak yakala.
 - dövizi bulamazsan TL yaz.
 - evrak_no: fatura no.
+- firma_adi satıcıdır.
+- Açıklama kısa olsun; tüm metni kopyalama.
 - Eğer bir alan bulunamazsa boş string döndür. Tahmin uydurma.
 """
     try:
@@ -1495,24 +1724,30 @@ Notlar:
             "Banka": "",
             "Tutar": normalize_amount(data.get("tutar", 0)),
             "Vade": normalize_date(data.get("vade", "")),
-            "Açıklama": str(data.get("aciklama", "")).strip(),
+            "Açıklama": str(data.get("aciklama", "")).strip()[:220],
             "Çeki veren": "",
             "Cirolu": "",
             "Asıl borçlu": "",
             "Kime verildi": "",
             "Evrak No": str(data.get("evrak_no", "")).strip(),
             "Döviz": normalize_currency(data.get("doviz", "TL")),
+            "Vergi Kimlik No": str(data.get("vergi_kimlik_no", "")).strip(),
+            "Ara Toplam": normalize_amount(data.get("ara_toplam", 0)),
+            "KDV Oranı": normalize_amount(data.get("kdv_orani", 0)),
+            "KDV Tutarı": normalize_amount(data.get("kdv_tutari", 0)),
             "Durum": "Beklemede"
         }
     except Exception as e:
         logging.exception(e)
         return None
+
 def archive_invoice(image: Image.Image) -> str:
     os.makedirs("invoices", exist_ok=True)
     fname = datetime.now().strftime("%Y%m%d_%H%M%S") + ".png"
     path = os.path.join("invoices", fname)
     image.save(path)
     return path
+
 # -------------------------
 # TEMPLATE EXCEL (Sayfa1 schema)
 # -------------------------
