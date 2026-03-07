@@ -13,3 +13,4 @@ pdf2image
 pytesseract
 opencv-python-headless
 PyMuPDF
+streamlit-drawable-canvas
