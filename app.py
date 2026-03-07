@@ -1,15 +1,16 @@
 import io
 import json
 import os
+import re
 from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import fitz  # PyMuPDF
 import pandas as pd
 import streamlit as st
 from PIL import Image, ImageDraw
 
-APP_TITLE = "Fatura Öğretme ve Tarama Sistemi — MVP"
+APP_TITLE = "Fatura Öğretme ve Tarama Sistemi — MVP v2"
 TEMPLATE_DIR = "templates"
 EXPORT_DIR = "exports"
 
@@ -27,6 +28,42 @@ FIELD_LABELS = [
     "notes",
 ]
 
+FIELD_COLORS = {
+    "seller_name": (0, 255, 255, 80),
+    "buyer_name": (0, 200, 255, 80),
+    "invoice_no": (255, 0, 255, 85),
+    "invoice_date": (255, 120, 255, 85),
+    "order_no": (180, 80, 255, 85),
+    "item_table": (255, 180, 0, 70),
+    "subtotal": (80, 255, 80, 85),
+    "vat_amount": (20, 220, 120, 85),
+    "total_amount": (60, 255, 160, 85),
+    "payable_amount": (0, 255, 120, 95),
+    "notes": (255, 255, 0, 70),
+}
+
+TOTAL_LABEL_PATTERNS = {
+    "subtotal": [
+        r"Mal\s*/?\s*Hizmet\s+Toplam\s+Tutar[ıi]\s*([0-9\.\,]+)",
+        r"Ara\s*Toplam\s*([0-9\.\,]+)",
+        r"KDV\s+Hari[cç]\s*Toplam\s*([0-9\.\,]+)",
+    ],
+    "vat_amount": [
+        r"Hesaplanan\s+KDV(?:\s*\(%\s*[0-9\.,]+\))?\s*([0-9\.\,]+)",
+        r"Toplam\s+KDV\s*([0-9\.\,]+)",
+        r"KDV\s+Tutar[ıi]\s*([0-9\.\,]+)",
+    ],
+    "total_amount": [
+        r"Vergiler\s+Dahil\s+Toplam\s+Tutar\s*([0-9\.\,]+)",
+        r"Genel\s+Toplam\s*([0-9\.\,]+)",
+        r"Toplam\s*Tutar\s*([0-9\.\,]+)",
+    ],
+    "payable_amount": [
+        r"[ÖO]denecek\s+Tutar\s*([0-9\.\,]+)",
+        r"Yek[uü]n\s*([0-9\.\,]+)",
+    ],
+}
+
 
 def ensure_dirs() -> None:
     os.makedirs(TEMPLATE_DIR, exist_ok=True)
@@ -35,6 +72,12 @@ def ensure_dirs() -> None:
 
 def normalize_text(text: str) -> str:
     return " ".join((text or "").replace("\n", " ").split()).strip()
+
+
+def clean_amount(value: str) -> str:
+    value = normalize_text(value)
+    m = re.search(r"([0-9]{1,3}(?:\.[0-9]{3})*(?:,[0-9]{2})|[0-9]+(?:,[0-9]{2})?)", value)
+    return m.group(1) if m else value
 
 
 def open_pdf(file_bytes: bytes) -> fitz.Document:
@@ -70,22 +113,40 @@ def extract_text_blocks(doc: fitz.Document, page_num: int = 0) -> List[Dict[str,
     return out
 
 
-def draw_blocks(img: Image.Image, blocks: List[Dict[str, Any]], labels: Dict[int, str], zoom: float = 2.0) -> Image.Image:
-    canvas = img.copy()
-    draw = ImageDraw.Draw(canvas)
-    for block in blocks:
-        bid = block["block_id"]
-        box = [block["x0"] * zoom, block["y0"] * zoom, block["x1"] * zoom, block["y1"] * zoom]
-        label = labels.get(bid, "")
-        color = "cyan" if label else "orange"
-        draw.rectangle(box, outline=color, width=3)
-        if label:
-            caption = f"[{label}] #{bid}"
-            tx = box[0]
-            ty = max(0, box[1] - 18)
-            draw.rectangle([tx, ty, tx + max(120, len(caption) * 8), ty + 18], fill="black")
-            draw.text((tx + 4, ty + 2), caption, fill="white")
-    return canvas
+def make_rgba(img: Image.Image) -> Image.Image:
+    return img.convert("RGBA") if img.mode != "RGBA" else img.copy()
+
+
+def draw_hologram_preview(
+    img: Image.Image,
+    blocks: List[Dict[str, Any]],
+    overlay_regions: List[Dict[str, Any]],
+    zoom: float = 2.0,
+) -> Image.Image:
+    canvas = make_rgba(img)
+    overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    block_map = {b["block_id"]: b for b in blocks}
+
+    for region in overlay_regions:
+        label = region.get("label", "")
+        color = FIELD_COLORS.get(label, (255, 140, 0, 75))
+        if "block_id" in region and region["block_id"] in block_map:
+            b = block_map[region["block_id"]]
+            x0, y0, x1, y1 = b["x0"] * zoom, b["y0"] * zoom, b["x1"] * zoom, b["y1"] * zoom
+        else:
+            x0, y0, x1, y1 = [v * zoom for v in region["bbox"]]
+
+        draw.rounded_rectangle([x0, y0, x1, y1], radius=8, fill=color, outline=(255, 255, 255, 220), width=3)
+        caption = f"{label}"
+        text_w = max(120, len(caption) * 8)
+        cap_y = max(0, y0 - 24)
+        draw.rounded_rectangle([x0, cap_y, x0 + text_w, cap_y + 22], radius=8, fill=(10, 10, 20, 210), outline=(255, 255, 255, 180), width=1)
+        draw.text((x0 + 8, cap_y + 4), caption, fill=(120, 255, 255, 255))
+
+    out = Image.alpha_composite(canvas, overlay)
+    return out.convert("RGB")
 
 
 def suggest_template_name(blocks: List[Dict[str, Any]]) -> str:
@@ -98,26 +159,54 @@ def suggest_template_name(blocks: List[Dict[str, Any]]) -> str:
     return f"template_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 
-def save_template(template_name: str, page_size: Tuple[int, int], blocks: List[Dict[str, Any]], labels: Dict[int, str]) -> str:
+def default_region_from_block(block: Dict[str, Any], page_size: Tuple[int, int], pad_x: float = 0.02, pad_y: float = 0.01) -> Dict[str, float]:
+    width, height = page_size
+    x0 = max(0.0, block["x0"] / width - pad_x)
+    y0 = max(0.0, block["y0"] / height - pad_y)
+    x1 = min(1.0, block["x1"] / width + pad_x)
+    y1 = min(1.0, block["y1"] / height + pad_y)
+    return {"rx0": x0, "ry0": y0, "rx1": x1, "ry1": y1}
+
+
+def bbox_from_relative(region: Dict[str, float], page_size: Tuple[int, int]) -> Tuple[float, float, float, float]:
+    width, height = page_size
+    return (
+        region["rx0"] * width,
+        region["ry0"] * height,
+        region["rx1"] * width,
+        region["ry1"] * height,
+    )
+
+
+def save_template(
+    template_name: str,
+    page_size: Tuple[int, int],
+    blocks: List[Dict[str, Any]],
+    labels: Dict[int, str],
+    custom_regions: Dict[str, Dict[str, float]],
+) -> str:
     labeled = []
     width, height = page_size
     for block in blocks:
         bid = block["block_id"]
         if bid not in labels:
             continue
+        label = labels[bid]
+        region = custom_regions.get(label) or default_region_from_block(block, page_size)
         labeled.append(
             {
                 "block_id": bid,
-                "label": labels[bid],
+                "label": label,
                 "text": block["text"],
                 "x0": block["x0"],
                 "y0": block["y0"],
                 "x1": block["x1"],
                 "y1": block["y1"],
-                "rx0": block["x0"] / width,
-                "ry0": block["y0"] / height,
-                "rx1": block["x1"] / width,
-                "ry1": block["y1"] / height,
+                "rx0": region["rx0"],
+                "ry0": region["ry0"],
+                "rx1": region["rx1"],
+                "ry1": region["ry1"],
+                "anchors": guess_anchors(block["text"], label),
             }
         )
 
@@ -144,6 +233,22 @@ def load_template(path: str) -> Dict[str, Any]:
         return json.load(f)
 
 
+def guess_anchors(text: str, label: str) -> List[str]:
+    anchor_map = {
+        "invoice_no": ["Fatura No"],
+        "invoice_date": ["Fatura Tarihi"],
+        "order_no": ["Sipariş No"],
+        "payable_amount": ["Ödenecek Tutar"],
+        "vat_amount": ["Hesaplanan KDV", "KDV"],
+        "subtotal": ["Mal / Hizmet Toplam", "Ara Toplam"],
+        "buyer_name": ["SAYIN"],
+    }
+    if label in anchor_map:
+        return anchor_map[label]
+    first = normalize_text(text)[:24]
+    return [first] if first else []
+
+
 def score_block_match(template_field: Dict[str, Any], block: Dict[str, Any], page_size: Tuple[int, int]) -> float:
     width, height = page_size
     target = (
@@ -157,24 +262,86 @@ def score_block_match(template_field: Dict[str, Any], block: Dict[str, Any], pag
     center_dist = abs(((target[0] + target[2]) / 2) - ((bx[0] + bx[2]) / 2)) + abs(((target[1] + target[3]) / 2) - ((bx[1] + bx[3]) / 2))
     area_diff = abs((target[2] - target[0]) * (target[3] - target[1]) - (bx[2] - bx[0]) * (bx[3] - bx[1]))
     text_bonus = 0
+    for anchor in template_field.get("anchors", []):
+        if anchor and anchor.lower() in block["text"].lower():
+            text_bonus -= 250
     sample = normalize_text(template_field.get("text", ""))[:20].lower()
     if sample and sample in block["text"].lower():
-        text_bonus = -100
+        text_bonus -= 100
     return center_dist + (area_diff / 1000.0) + text_bonus
 
 
-def apply_template(template: Dict[str, Any], blocks: List[Dict[str, Any]], page_size: Tuple[int, int]) -> Dict[str, str]:
+def apply_template(template: Dict[str, Any], blocks: List[Dict[str, Any]], page_size: Tuple[int, int]) -> Tuple[Dict[str, str], Dict[str, int], Dict[str, Dict[str, float]]]:
     result: Dict[str, str] = {}
+    matched_ids: Dict[str, int] = {}
+    matched_regions: Dict[str, Dict[str, float]] = {}
     used_ids = set()
+
     for field in template.get("fields", []):
         ranked = sorted(blocks, key=lambda b: score_block_match(field, b, page_size))
         for cand in ranked:
             if cand["block_id"] in used_ids:
                 continue
             result[field["label"]] = cand["text"]
+            matched_ids[field["label"]] = cand["block_id"]
+            matched_regions[field["label"]] = {"rx0": field["rx0"], "ry0": field["ry0"], "rx1": field["rx1"], "ry1": field["ry1"]}
             used_ids.add(cand["block_id"])
             break
-    return result
+    return result, matched_ids, matched_regions
+
+
+def extract_text_in_region(blocks: List[Dict[str, Any]], bbox: Tuple[float, float, float, float]) -> str:
+    x0, y0, x1, y1 = bbox
+    parts = []
+    for b in blocks:
+        cx = (b["x0"] + b["x1"]) / 2
+        cy = (b["y0"] + b["y1"]) / 2
+        if x0 <= cx <= x1 and y0 <= cy <= y1:
+            parts.append(b["text"])
+    return "\n".join(parts)
+
+
+def extract_nearby_totals(
+    extracted: Dict[str, str],
+    matched_ids: Dict[str, int],
+    blocks: List[Dict[str, Any]],
+    page_size: Tuple[int, int],
+) -> Dict[str, str]:
+    payable_id = matched_ids.get("payable_amount")
+    if payable_id is None:
+        return extracted
+
+    payable_block = next((b for b in blocks if b["block_id"] == payable_id), None)
+    if not payable_block:
+        return extracted
+
+    width, height = page_size
+    x0 = max(0.0, payable_block["x0"] - width * 0.28)
+    y0 = max(0.0, payable_block["y0"] - height * 0.18)
+    x1 = min(width, payable_block["x1"] + width * 0.05)
+    y1 = min(height, payable_block["y1"] + height * 0.10)
+    region_text = extract_text_in_region(blocks, (x0, y0, x1, y1))
+    merged_text = region_text + "\n" + extracted.get("payable_amount", "")
+
+    for key, patterns in TOTAL_LABEL_PATTERNS.items():
+        if extracted.get(key):
+            continue
+        for pat in patterns:
+            m = re.search(pat, merged_text, flags=re.IGNORECASE)
+            if m:
+                extracted[key] = clean_amount(m.group(1))
+                break
+
+    # If payable_amount currently contains the whole nearby text, refine it.
+    raw_payable = extracted.get("payable_amount", "")
+    if len(raw_payable) > 32 or any(term in raw_payable.lower() for term in ["kdv", "toplam", "ödenecek"]):
+        for pat in TOTAL_LABEL_PATTERNS["payable_amount"]:
+            m = re.search(pat, merged_text, flags=re.IGNORECASE)
+            if m:
+                extracted["payable_amount"] = clean_amount(m.group(1))
+                break
+
+    return extracted
 
 
 def fields_to_dataframe(mapping: Dict[str, str]) -> pd.DataFrame:
@@ -183,7 +350,8 @@ def fields_to_dataframe(mapping: Dict[str, str]) -> pd.DataFrame:
 
 
 def export_fields_to_excel(mapping: Dict[str, str]) -> bytes:
-    df = pd.DataFrame([mapping])
+    ordered = {k: mapping.get(k, "") for k in FIELD_LABELS}
+    df = pd.DataFrame([ordered])
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Fatura")
@@ -193,8 +361,8 @@ def export_fields_to_excel(mapping: Dict[str, str]) -> bytes:
 def init_state() -> None:
     defaults = {
         "labels": {},
-        "selected_block_id": None,
         "mode": "Öğretme Modu",
+        "custom_regions": {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -208,8 +376,16 @@ def teaching_mode(file_bytes: bytes) -> None:
     blocks = extract_text_blocks(doc, 0)
     img = render_page(doc, 0, zoom=2.0)
 
-    st.subheader("1) Sayfa önizleme")
-    preview = draw_blocks(img, blocks, st.session_state.labels, zoom=2.0)
+    overlay_regions = []
+    for bid, label in st.session_state.labels.items():
+        region = st.session_state.custom_regions.get(label)
+        if region:
+            overlay_regions.append({"label": label, "bbox": bbox_from_relative(region, page_size)})
+        else:
+            overlay_regions.append({"label": label, "block_id": bid})
+
+    st.subheader("1) Hologramik önizleme")
+    preview = draw_hologram_preview(img, blocks, overlay_regions, zoom=2.0)
     st.image(preview, use_container_width=True)
 
     st.subheader("2) Metin blokları")
@@ -225,6 +401,8 @@ def teaching_mode(file_bytes: bytes) -> None:
     with c2:
         if st.button("Etiketi ata"):
             st.session_state.labels[selected_id] = field
+            if field not in st.session_state.custom_regions:
+                st.session_state.custom_regions[field] = default_region_from_block(block, page_size)
             st.rerun()
 
     if st.session_state.labels:
@@ -236,16 +414,42 @@ def teaching_mode(file_bytes: bytes) -> None:
                 labeled_rows.append({"block_id": bid, "label": label, "text": b["text"]})
         st.dataframe(pd.DataFrame(labeled_rows), use_container_width=True)
 
+        st.subheader("4) Alan penceresini ayarla")
+        edit_label = st.selectbox("Düzenlenecek alan", sorted(set(st.session_state.labels.values())))
+        region = st.session_state.custom_regions.get(edit_label)
+        if not region:
+            bid = next((bid for bid, lbl in st.session_state.labels.items() if lbl == edit_label), None)
+            if bid is not None:
+                region = default_region_from_block(next(b for b in blocks if b["block_id"] == bid), page_size)
+                st.session_state.custom_regions[edit_label] = region
+        if region:
+            col_a, col_b, col_c, col_d = st.columns(4)
+            with col_a:
+                rx0 = st.slider("Sol", 0.0, 1.0, float(region["rx0"]), 0.005, key=f"rx0_{edit_label}")
+            with col_b:
+                ry0 = st.slider("Üst", 0.0, 1.0, float(region["ry0"]), 0.005, key=f"ry0_{edit_label}")
+            with col_c:
+                rx1 = st.slider("Sağ", 0.0, 1.0, float(region["rx1"]), 0.005, key=f"rx1_{edit_label}")
+            with col_d:
+                ry1 = st.slider("Alt", 0.0, 1.0, float(region["ry1"]), 0.005, key=f"ry1_{edit_label}")
+
+            if rx1 <= rx0:
+                rx1 = min(1.0, rx0 + 0.01)
+            if ry1 <= ry0:
+                ry1 = min(1.0, ry0 + 0.01)
+            st.session_state.custom_regions[edit_label] = {"rx0": rx0, "ry0": ry0, "rx1": rx1, "ry1": ry1}
+
         c3, c4 = st.columns([2, 1])
         with c3:
             template_name = st.text_input("Şablon adı", value=suggest_template_name(blocks))
         with c4:
             if st.button("Şablonu kaydet"):
-                path = save_template(template_name, page_size, blocks, st.session_state.labels)
+                path = save_template(template_name, page_size, blocks, st.session_state.labels, st.session_state.custom_regions)
                 st.success(f"Şablon kaydedildi: {path}")
 
     if st.button("Etiketleri sıfırla"):
         st.session_state.labels = {}
+        st.session_state.custom_regions = {}
         st.rerun()
 
 
@@ -263,21 +467,22 @@ def scanning_mode(file_bytes: bytes) -> None:
 
     template_file = st.selectbox("Şablon seç", templates)
     template = load_template(os.path.join(TEMPLATE_DIR, template_file))
-    extracted = apply_template(template, blocks, page_size)
+    extracted, matched_ids, matched_regions = apply_template(template, blocks, page_size)
+    extracted = extract_nearby_totals(extracted, matched_ids, blocks, page_size)
 
-    st.subheader("Önizleme")
-    preview_labels = {}
-    for field in template.get("fields", []):
-        for block in blocks:
-            if extracted.get(field["label"]) == block["text"]:
-                preview_labels[block["block_id"]] = field["label"]
-                break
-    preview = draw_blocks(img, blocks, preview_labels, zoom=2.0)
+    overlay_regions = []
+    for label, region in matched_regions.items():
+        overlay_regions.append({"label": label, "bbox": bbox_from_relative(region, page_size)})
+    st.subheader("Hologramik önizleme")
+    preview = draw_hologram_preview(img, blocks, overlay_regions, zoom=2.0)
     st.image(preview, use_container_width=True)
 
     st.subheader("Çıkarılan alanlar")
     df = fields_to_dataframe(extracted)
     st.dataframe(df, use_container_width=True)
+
+    st.subheader("Yakın toplam mantığı")
+    st.caption("Ödenecek Tutar bulunduysa, yakın çevresindeki KDV'siz toplam + KDV + genel toplam da otomatik çekilir.")
 
     excel_bytes = export_fields_to_excel(extracted)
     st.download_button(
@@ -289,9 +494,9 @@ def scanning_mode(file_bytes: bytes) -> None:
 
 
 def main() -> None:
+    st.set_page_config(page_title=APP_TITLE, layout="wide")
     ensure_dirs()
     init_state()
-    st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
     st.caption("Önce öğret, sonra aynı şablonla tara ve Excel'e at.")
 
