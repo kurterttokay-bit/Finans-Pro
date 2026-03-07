@@ -1254,6 +1254,59 @@ def parse_invoice_from_text(text: str) -> dict | None:
     useful = [result.get("Firma Adı"), result.get("Evrak No"), result.get("Vergi Kimlik No"), result.get("Tutar")]
     return result if any(v not in ("", 0, 0.0, None) for v in useful) else None
 
+def sanitize_bulk_result(result: dict | None, raw_text: str = "") -> dict | None:
+    if not result:
+        return None
+
+    out = dict(result)
+
+    firma = str(out.get("Firma Adı", "") or out.get("firma_adi", "")).strip()
+    evrak_no = str(out.get("Evrak No", "") or out.get("evrak_no", "")).strip()
+    aciklama = str(out.get("Açıklama", "") or out.get("aciklama", "")).strip()
+
+    try:
+        tutar = float(normalize_amount(out.get("Tutar", out.get("genel_toplam", 0))))
+    except Exception:
+        tutar = 0.0
+
+    suspicious_description = (
+        len(aciklama) > 180
+        or "fatura" in aciklama.lower()
+        or "verg" in aciklama.lower()
+        or "kdv" in aciklama.lower()
+        or "toplam" in aciklama.lower()
+    )
+
+    weak_core_fields = (
+        not firma
+        or not evrak_no
+        or tutar <= 0
+    )
+
+    if suspicious_description and weak_core_fields:
+        text_result = parse_invoice_from_text(raw_text or "")
+        if text_result:
+            merged = merge_invoice_data(text_result, out)
+            firma2 = str(merged.get("Firma Adı", "") or merged.get("firma_adi", "")).strip()
+            evrak_no2 = str(merged.get("Evrak No", "") or merged.get("evrak_no", "")).strip()
+            try:
+                tutar2 = float(normalize_amount(merged.get("Tutar", merged.get("genel_toplam", 0))))
+            except Exception:
+                tutar2 = 0.0
+
+            if firma2 or evrak_no2 or tutar2 > 0:
+                out = merged
+            else:
+                return None
+        else:
+            return None
+
+    aciklama = str(out.get("Açıklama", "") or out.get("aciklama", "")).strip()
+    if len(aciklama) > 250:
+        out["Açıklama"] = aciklama[:250]
+
+    return out
+
 def process_uploaded_invoice_bytes(file_bytes: bytes, source_name: str = "", file_type: str = "", do_ocr: bool = False) -> dict:
     raw_image = None
     image = None
@@ -1618,6 +1671,7 @@ def render_scan_center(section_key: str = "scan", title: str = "Tarama → Otoma
                         file_bytes = uf.read()
                     payload = process_uploaded_invoice_bytes(file_bytes, source_name=getattr(uf, "name", ""), file_type=getattr(uf, "type", "") or "", do_ocr=bulk_ocr)
                     result = apply_vendor_enrichment(payload.get("result"), raw_text=payload.get("ocr_text", ""))
+                    result = sanitize_bulk_result(result, raw_text=payload.get("ocr_text", ""))
                     if result:
                         row = build_invoice_record(result, ocr_text=payload.get("ocr_text", ""), source_name=payload.get("source_name", ""))
                         prepared_records.append(row)
@@ -2214,6 +2268,7 @@ elif menu == "AI Evrak Analizi":
             for i, uf in enumerate(bulk_files, start=1):
                 payload = process_uploaded_invoice(uf, do_ocr=bulk_ocr)
                 result = apply_vendor_enrichment(payload.get("result"), raw_text=payload.get("ocr_text", ""))
+                result = sanitize_bulk_result(result, raw_text=payload.get("ocr_text", ""))
                 if result:
                     row = build_invoice_record(result, ocr_text=payload.get("ocr_text", ""), source_name=payload.get("source_name", ""))
 
@@ -2281,3 +2336,20 @@ VERİ (ilk 120 kayıt):
             except Exception as e:
                 st.error(f"AI hata: {e}")
     st.markdown("</div>", unsafe_allow_html=True)
+# -------------------------
+# ROUTER
+# -------------------------
+
+if st.session_state.page == "home":
+    home_page()
+
+elif st.session_state.page == "invoice":
+    invoice_tool()
+
+elif st.session_state.page == "earsiv":
+    st.title("E-Arşiv Parser")
+    st.info("yakında...")
+
+elif st.session_state.page == "fx":
+    st.title("Kur Analizi")
+    st.info("yakında...")
