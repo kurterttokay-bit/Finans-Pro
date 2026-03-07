@@ -724,7 +724,7 @@ def build_invoice_record(parsed: dict | None, ocr_text: str = "", source_name: s
         "genel_toplam": genel_toplam,
         "kategori": str(parsed.get("Kategori", parsed.get("kategori", ""))).strip(),
         "odeme_durumu": str(parsed.get("Durum", parsed.get("odeme_durumu", "Beklemede"))).strip() or "Beklemede",
-        "aciklama": str(parsed.get("Açıklama", parsed.get("aciklama", ""))).strip(),
+        "aciklama": (lambda _a: "" if len(_a) > 80 or "\n" in _a else _a)(str(parsed.get("Açıklama", parsed.get("aciklama", ""))).strip()),
         "ham_metin": (ocr_text or str(parsed.get("ham_metin", ""))).strip(),
         "kaynak_dosya": source_name,
         "created_at": now_str,
@@ -1270,11 +1270,12 @@ def sanitize_bulk_result(result: dict | None, raw_text: str = "") -> dict | None
         tutar = 0.0
 
     suspicious_description = (
-        len(aciklama) > 180
-        or "fatura" in aciklama.lower()
-        or "verg" in aciklama.lower()
-        or "kdv" in aciklama.lower()
-        or "toplam" in aciklama.lower()
+        len(aciklama) > 120
+        or "\n" in aciklama
+        or aciklama.lower().count("fatura") >= 2
+        or aciklama.lower().count("toplam") >= 2
+        or aciklama.lower().count("kdv") >= 2
+        or "vergi" in aciklama.lower()
     )
 
     weak_core_fields = (
@@ -1283,6 +1284,12 @@ def sanitize_bulk_result(result: dict | None, raw_text: str = "") -> dict | None
         or tutar <= 0
     )
 
+    # Açıklama alanı OCR dökümüne dönmüşse asla olduğu gibi kaydetme.
+    if suspicious_description:
+        out["Açıklama"] = ""
+        out["aciklama"] = ""
+
+    # Ana alanlar da zayıfsa text parser ile tekrar dene; yine kötü ise kaydetme.
     if suspicious_description and weak_core_fields:
         text_result = parse_invoice_from_text(raw_text or "")
         if text_result:
@@ -1294,16 +1301,23 @@ def sanitize_bulk_result(result: dict | None, raw_text: str = "") -> dict | None
             except Exception:
                 tutar2 = 0.0
 
-            if firma2 or evrak_no2 or tutar2 > 0:
-                out = merged
-            else:
-                return None
-        else:
-            return None
+            merged["Açıklama"] = ""
+            merged["aciklama"] = ""
 
-    aciklama = str(out.get("Açıklama", "") or out.get("aciklama", "")).strip()
-    if len(aciklama) > 250:
-        out["Açıklama"] = aciklama[:250]
+            if firma2 and evrak_no2 and tutar2 > 0:
+                return merged
+
+        return None
+
+    # Ana alanlar tek başına da çok zayıfsa kaydetme.
+    if not firma or tutar <= 0:
+        return None
+
+    # Açıklama kısa ve temiz değilse boş bırak.
+    aciklama2 = str(out.get("Açıklama", "") or out.get("aciklama", "")).strip()
+    if len(aciklama2) > 80:
+        out["Açıklama"] = ""
+        out["aciklama"] = ""
 
     return out
 
@@ -2336,20 +2350,3 @@ VERİ (ilk 120 kayıt):
             except Exception as e:
                 st.error(f"AI hata: {e}")
     st.markdown("</div>", unsafe_allow_html=True)
-# -------------------------
-# ROUTER
-# -------------------------
-
-if st.session_state.page == "home":
-    home_page()
-
-elif st.session_state.page == "invoice":
-    invoice_tool()
-
-elif st.session_state.page == "earsiv":
-    st.title("E-Arşiv Parser")
-    st.info("yakında...")
-
-elif st.session_state.page == "fx":
-    st.title("Kur Analizi")
-    st.info("yakında...")
