@@ -1,2587 +1,388 @@
-import streamlit as st
-import pandas as pd
-import yfinance as yf
-import google.generativeai as genai
-from datetime import datetime, timedelta
-from PIL import Image
-import json
 import re
-import logging
-logging.getLogger("yfinance").setLevel(logging.CRITICAL)
-import plotly.express as px
-import os
-from urllib.parse import urlencode
 from io import BytesIO
+from datetime import datetime
 
-# -------------------------
-# SAFE FALLBACK IMPORTS
-# -------------------------
+import pandas as pd
+import streamlit as st
+
+# Optional libs
 try:
-    from vendor_rules import enrich_invoice_fields
+    from pypdf import PdfReader
 except Exception:
-    def enrich_invoice_fields(data, raw_text="", corrections_df=None):
-        return data or {}
+    PdfReader = None
 
 try:
-    from corrections_memory import build_correction_record
+    import fitz  # PyMuPDF
 except Exception:
-    def build_correction_record(source_name="", raw_vendor="", corrected_vendor="", raw_category="", corrected_category="", raw_text="", note=""):
-        return {
-            "tarih": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "kaynak_dosya": source_name,
-            "ham_firma": raw_vendor,
-            "duzeltilmis_firma": corrected_vendor,
-            "ham_kategori": raw_category,
-            "duzeltilmis_kategori": corrected_category,
-            "ham_metin": raw_text,
-            "not": note,
-        }
+    fitz = None
 
 try:
-    from json_utils import safe_json_loads
+    from pdf2image import convert_from_bytes
 except Exception:
-    def safe_json_loads(text):
-        if not text:
-            return {}
-        text = str(text).strip()
-        try:
-            return json.loads(text)
-        except Exception:
-            match = re.search(r"\{[\s\S]*\}", text)
-            if match:
-                try:
-                    return json.loads(match.group(0))
-                except Exception:
-                    return {}
-            return {}
+    convert_from_bytes = None
 
 try:
-    from invoice_normalizers import normalize_amount, normalize_currency, normalize_date
+    import pytesseract
 except Exception:
-    def normalize_amount(value):
-        if value is None or value == "":
-            return 0.0
-        if isinstance(value, (int, float)):
-            return float(value)
-        s = str(value).strip()
-        s = s.replace("TL", "").replace("TRY", "").replace("₺", "").replace("%", "")
-        s = s.replace(" ", "")
-        if "," in s and "." in s:
-            if s.rfind(",") > s.rfind("."):
-                s = s.replace(".", "").replace(",", ".")
-            else:
-                s = s.replace(",", "")
-        elif "," in s:
-            s = s.replace(".", "").replace(",", ".")
-        try:
-            return float(s)
-        except Exception:
-            m = re.search(r"-?\d+(?:[\.,]\d+)?", s)
-            if not m:
-                return 0.0
-            return float(m.group(0).replace(",", "."))
-
-    def normalize_currency(value):
-        s = str(value or "TL").strip().upper()
-        mapping = {"TRY": "TL", "TRL": "TL", "₺": "TL", "$": "USD", "USDT": "USD", "€": "EUR"}
-        return mapping.get(s, s or "TL")
-
-    def normalize_date(value):
-        s = str(value or "").strip()
-        if not s:
-            return ""
-        for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
-            try:
-                return datetime.strptime(s, fmt).strftime("%d.%m.%Y")
-            except Exception:
-                pass
-        m = re.search(r"(\d{2})[./-](\d{2})[./-](\d{4})", s)
-        if m:
-            return f"{m.group(1)}.{m.group(2)}.{m.group(3)}"
-        return s
+    pytesseract = None
 
 try:
-    from sheet_ops import read_sheet, append_row, replace_sheet, SHEET_COLUMNS
+    from PIL import Image
 except Exception:
-    SHEET_COLUMNS = [
-        "kayit_tarihi", "belge_tarihi", "firma_adi", "evrak_tipi", "evrak_no",
-        "vergi_kimlik_no", "para_birimi", "ara_toplam", "kdv_orani", "kdv_tutari",
-        "genel_toplam", "kategori", "odeme_durumu", "aciklama", "ham_metin",
-        "kaynak_dosya", "created_at", "updated_at"
-    ]
+    Image = None
 
-    def read_sheet(conn, worksheet=None):
-        try:
-            if worksheet:
-                return conn.read(worksheet=worksheet)
-            return conn.read()
-        except Exception:
-            return pd.DataFrame(columns=SHEET_COLUMNS)
-
-    def append_row(conn, record, worksheet=None):
-        try:
-            current = read_sheet(conn, worksheet=worksheet)
-            if current is None or getattr(current, "empty", True):
-                current = pd.DataFrame(columns=SHEET_COLUMNS)
-            updated = pd.concat([current, pd.DataFrame([record])], ignore_index=True)
-            if worksheet:
-                conn.update(worksheet=worksheet, data=updated)
-            else:
-                conn.update(data=updated)
-        except Exception as e:
-            raise e
-
-    def replace_sheet(conn, df, worksheet=None):
-        if worksheet:
-            conn.update(worksheet=worksheet, data=df)
-        else:
-            conn.update(data=df)
-
-# -------------------------
-# PAGE ROUTER
-# -------------------------
-if "page" not in st.session_state:
-    st.session_state.page = "home"
-
-# -------------------------
-# OPTIONAL LIBS (PDF / OCR)
-# -------------------------
-PDF_ENABLED = False
-OCR_ENABLED = False
-try:
-    from pdf2image import convert_from_bytes  # requires poppler-utils in Streamlit Cloud
-    PDF_ENABLED = True
-except Exception:
-    PDF_ENABLED = False
-try:
-    import pytesseract  # requires tesseract-ocr in Streamlit Cloud
-    OCR_ENABLED = True
-except Exception:
-    OCR_ENABLED = False
-# -------------------------
-# GSHEETS CONNECTION (compat)
-# -------------------------
-try:
-    from streamlit_gsheets import GSheetsConnection
-except ImportError:
-    try:
-        from st_gsheets_connection import GSheetsConnection
-    except ImportError:
-        GSheetsConnection = None
-# -------------------------
-# CONFIG
-# -------------------------
-st.set_page_config(page_title="Finans Enterprise", page_icon="🏦", layout="wide")
-logging.basicConfig(level=logging.INFO)
-APP_TITLE = "🏦 Finans Enterprise"
-WORKSHEET_NAME = "Sayfa1"  # Google Sheets worksheet
-CORRECTIONS_WORKSHEET = "DuzeltmeHafizasi"
-CORRECTIONS_COLUMNS = ["tarih", "kaynak_dosya", "ham_firma", "duzeltilmis_firma", "ham_kategori", "duzeltilmis_kategori", "ham_metin", "not"]
-def get_sheets_url() -> str:
-    """Try to find the Google Sheets URL from secrets in multiple common locations."""
-    # 1) Top-level SHEETS_URL
-    try:
-        v = st.secrets.get("SHEETS_URL", "")
-        if v: return str(v)
-    except Exception:
-        pass
-    # 2) connections.gsheets.spreadsheet
-    try:
-        v = st.secrets.get("connections", {}).get("gsheets", {}).get("spreadsheet", "")
-        if v: return str(v)
-    except Exception:
-        pass
-    # 3) connections.gsheets.url (some setups)
-    try:
-        v = st.secrets.get("connections", {}).get("gsheets", {}).get("url", "")
-        if v: return str(v)
-    except Exception:
-        pass
-    return ""
-# -------------------------
-# THEME (Light/Dark)
-# -------------------------
-# -------------------------
-# THEME (auto from device, user override via sidebar)
-# -------------------------
-from streamlit import components
-def _get_query_params():
-    # Streamlit versions differ: try modern st.query_params first
-    try:
-        return dict(st.query_params)
-    except Exception:
-        try:
-            return st.experimental_get_query_params()
-        except Exception:
-            return {}
-def _set_query_params(**kwargs):
-    try:
-        st.query_params.update(kwargs)  # modern API
-    except Exception:
-        st.experimental_set_query_params(**kwargs)
-def bootstrap_theme():
-    """Initialize theme_mode from URL (?theme=dark|light) or from device preference (prefers-color-scheme).
-    - If URL has ?theme=dark|light -> use it.
-    - Else: set a safe default (Light) immediately so UI renders,
-      then run a one-time JS redirect to append ?theme=... based on device preference.
-    """
-    qp = _get_query_params()
-    # Already initialized this session
-    if "theme_mode" in st.session_state:
-        return
-    qp_theme = None
-    if isinstance(qp, dict):
-        raw = qp.get("theme")
-        if isinstance(raw, list) and raw:
-            raw = raw[0]
-        if isinstance(raw, str) and raw.strip():
-            qp_theme = raw.strip().lower()
-    if qp_theme in ("dark", "light"):
-        st.session_state.theme_mode = "Dark" if qp_theme == "dark" else "Light"
-        st.session_state["_theme_redirected"] = True
-        return
-    # Render immediately with a safe default (Light)
-    st.session_state.theme_mode = "Light"
-    # One-time auto-detect + redirect (no st.stop -> prevents 'black screen')
-    if not st.session_state.get("_theme_redirected", False):
-        st.session_state["_theme_redirected"] = True
-        components.v1.html(
-            """<script>
-            (function() {
-              try {
-                const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-                const theme = prefersDark ? 'dark' : 'light';
-                const url = new URL(window.location.href);
-                if (!url.searchParams.get('theme')) {
-                  url.searchParams.set('theme', theme);
-                  window.location.replace(url.toString());
-                }
-              } catch (e) {}
-            })();
-            </script>""",
-            height=0,
-        )
-bootstrap_theme()
-def inject_theme_css(theme: str):
-    """
-    Streamlit built-in theme runtime'da değişmediği için Light/Dark görünümü CSS ile token'lıyoruz.
-    Önemli: f-string içinde CSS blok parantezleri {{ }} olmalı.
-    """
-    is_light = str(theme).lower().startswith("l")
-    if is_light:
-        bg = "#F6F7FB"
-        panel = "#FFFFFF"
-        text = "#0F172A"
-        muted = "#475569"
-        border = "rgba(2, 6, 23, .10)"
-        card = "#FFFFFF"
-        card2 = "rgba(15, 23, 42, .02)"
-        shadow = "0 10px 26px rgba(16,24,40,0.08)"
-        input_bg = "#FFFFFF"
-    else:
-        bg = "#0B1220"
-        panel = "rgba(15, 23, 42, .70)"
-        text = "#E5E7EB"
-        muted = "#9CA3AF"
-        border = "rgba(148, 163, 184, .18)"
-        card = "rgba(2, 6, 23, .38)"
-        card2 = "rgba(255,255,255,.03)"
-        shadow = "0 14px 34px rgba(0,0,0,.24)"
-        input_bg = "rgba(255,255,255,.04)"
-    css = f"""
-    <style>
-    /* ---- Layout (SaaS-like width + spacing) ---- */
-    .block-container {{
-        max-width: 1180px;
-        padding-top: 1.25rem;
-        padding-bottom: 2.5rem;
-    }}
-    /* ---- Base ---- */
-    .stApp {{
-        background: {bg};
-        color: {text};
-    }}
-    [data-testid="stMarkdownContainer"] {{
-        color: {text};
-    }}
-    /* Sidebar */
-    section[data-testid="stSidebar"] {{
-        background: {panel};
-        border-right: 1px solid {border};
-    }}
-    /* Headings */
-    h1, h2, h3, h4 {{
-        color: {text};
-        letter-spacing: -0.02em;
-        line-height: 1.15;
-    }}
-    .muted {{
-        color: {muted} !important;
-    }}
-    /* ---- Cards: use Streamlit native bordered containers ---- */
-    div[data-testid="stVerticalBlockBorderWrapper"] {{
-        background: {card};
-        border: 1px solid {border};
-        border-radius: 16px;
-        padding: 16px 16px 12px 16px;
-        box-shadow: {shadow};
-        backdrop-filter: blur(10px);
-    }}
-    /* ---- Buttons ---- */
-    .stDownloadButton button, .stButton button {{
-        border-radius: 12px !important;
-        border: 1px solid {border} !important;
-        background: {card2} !important;
-        color: {text} !important;
-    }}
-    .stDownloadButton button:hover, .stButton button:hover {{
-        filter: brightness(1.06);
-        transform: translateY(-1px);
-    }}
-    /* ---- Inputs / Selects: fix "Light mode görünmüyor" ---- */
-    .stTextInput input, .stNumberInput input {{
-        background: {input_bg} !important;
-        color: {text} !important;
-        border: 1px solid {border} !important;
-        border-radius: 12px !important;
-    }}
-    .stTextArea textarea {{
-        background: {input_bg} !important;
-        color: {text} !important;
-        border: 1px solid {border} !important;
-        border-radius: 12px !important;
-    }}
-    div[data-baseweb="select"] > div {{
-        background: {input_bg} !important;
-        border: 1px solid {border} !important;
-        border-radius: 12px !important;
-        color: {text} !important;
-    }}
-    div[data-baseweb="select"] span {{
-        color: {text} !important;
-    }}
-    /* File uploader dropzone */
-    div[data-testid="stFileUploaderDropzone"] {{
-        border-radius: 14px;
-        border: 1px dashed {border};
-        background: {card2};
-        color: {text};
-    }}
-    /* Dataframe */
-    div[data-testid="stDataFrame"] {{
-        border-radius: 12px;
-        overflow: hidden;
-        border: 1px solid {border};
-    }}
-    /* Badges + accent line */
-    .badge {{
-        font-size: 12px;
-        padding: 4px 10px;
-        border-radius: 999px;
-        border: 1px solid {border};
-        background: {card2};
-        color: {muted};
-        white-space: nowrap;
-    }}
-    .accent-line {{
-        height: 3px;
-        width: 52px;
-        border-radius: 999px;
-        background: rgba(99, 102, 241, .8);
-        margin-top: 10px;
-        margin-bottom: 4px;
-    }}
-    /* Hero */
-    .hero {{
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-end;
-        gap: 12px;
-        margin: 6px 0 18px 0;
-    }}
-    .hero h1 {{
-        font-size: 34px;
-        margin: 0;
-    }}
-    .hero p {{
-        margin: 8px 0 0 0;
-        color: {muted};
-        max-width: 680px;
-    }}
-    .kpi-row {{
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 12px;
-        margin-bottom: 16px;
-    }}
-    .kpi {{
-        background: {card};
-        border: 1px solid {border};
-        border-radius: 16px;
-        padding: 12px 14px;
-        box-shadow: {shadow};
-    }}
-    .kpi .label {{
-        color: {muted};
-        font-size: 12px;
-        margin-bottom: 6px;
-    }}
-    .kpi .value {{
-        font-size: 18px;
-        font-weight: 700;
-        color: {text};
-    }}
-    /* Stepper */
-    .stepper {{
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        gap: 10px;
-        margin: 10px 0 18px 0;
-    }}
-    .step {{
-        border: 1px solid {border};
-        background: {card2};
-        border-radius: 14px;
-        padding: 10px 12px;
-    }}
-    .step .t {{
-        font-weight: 700;
-        font-size: 13px;
-        margin-bottom: 4px;
-        color: {text};
-    }}
-    .step .d {{
-        font-size: 12px;
-        color: {muted};
-        line-height: 1.3;
-    }}
-    
-    /* ---- Flow selector (Islem Merkezi) - scoped to radio key: flow_radio_pick ---- */
-    div[data-testid="stRadio"]:has(input[id^="flow_radio_pick"]) > div[role="radiogroup"] {{
-        display: flex;
-        gap: 14px;
-        flex-wrap: wrap;
-    }}
-    div[data-testid="stRadio"]:has(input[id^="flow_radio_pick"]) label {{
-        border: 1px solid {border};
-        background: {card};
-        border-radius: 18px;
-        padding: 18px 18px;
-        min-height: 92px;
-        align-items: flex-start;
-        box-shadow: {shadow};
-        flex: 1 1 240px;
-        max-width: 420px;
-    }}
-    div[data-testid="stRadio"]:has(input[id^="flow_radio_pick"]) label p {{
-        font-weight: 700;
-        font-size: 22px;
-        line-height: 1.15;
-        margin-top: -2px;
-    }}
-    div[data-testid="stRadio"]:has(input[id^="flow_radio_pick"]) label:hover {{
-        border-color: rgba(59,130,246,.55);
-        transform: translateY(-1px);
-        transition: transform .12s ease;
-    }}
-    div[data-testid="stRadio"]:has(input[id^="flow_radio_pick"]) input:checked + div {{
-        border-radius: 16px;
-        outline: 2px solid rgba(99,102,241,.55);
-        outline-offset: 2px;
-    }}
-    /* ---- Flow cards (Islem Merkezi) ---- */
-    .flowcards {{
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 14px;
-        margin-top: 8px;
-        margin-bottom: 12px;
-    }}
-    @media (max-width: 1100px) {{
-        .flowcards {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
-    }}
-    @media (max-width: 600px) {{
-        .flowcards {{ grid-template-columns: 1fr; }}
-    }}
-    a.flowcard {{
-        display: block;
-        text-decoration: none;
-        border-radius: 16px;
-        border: 1px solid {border};
-        background: {card};
-        padding: 16px 16px 14px 16px;
-        transition: transform .15s ease, border-color .15s ease, filter .15s ease;
-    }}
-    a.flowcard:hover {{
-        transform: translateY(-1px);
-        filter: brightness(1.02);
-    }}
-    a.flowcard.selected {{
-        border-color: rgba(99, 102, 241, .65);
-        box-shadow: 0 10px 30px rgba(99, 102, 241, .15);
-    }}
-    .flow-top {{
-        display:flex;
-        align-items:center;
-        justify-content:space-between;
-        gap: 10px;
-        margin-bottom: 8px;
-    }}
-    .flow-ttl {{
-        font-weight: 800;
-        font-size: 18px;
-        letter-spacing: -0.02em;
-        color: {text};
-        line-height: 1.15;
-    }}
-    .flow-sub {{
-        color: {muted};
-        font-size: 14px;
-        line-height: 1.35;
-    }}
-    .flow-pill {{
-        font-size: 12px;
-        padding: 6px 10px;
-        border-radius: 999px;
-        border: 1px solid {border};
-        color: {muted};
-        background: rgba(255,255,255,.04);
-        white-space: nowrap;
-    }}
-    .flow-ico {{
-        width: 34px;
-        height: 34px;
-        border-radius: 12px;
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        border: 1px solid {border};
-        background: rgba(255,255,255,.04);
-        flex: 0 0 auto;
-        font-size: 16px;
-    }}
-    /* Panel entrance animation (only the selected flow panel wrapper) */
-    @keyframes fadeUp {{
-        from {{ opacity: 0; transform: translateY(8px); }}
-        to   {{ opacity: 1; transform: translateY(0px); }}
-    }}
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.flow-panel-marker) {{
-        animation: fadeUp .22s ease-out;
-    }}
-</style>
-    """
-    st.markdown(css, unsafe_allow_html=True)
-# -------------------------
-# AUTH SYSTEM
-# -------------------------
-ROLES = {
-    "patron125": "PATRON",
-    "muhasebe007": "MUHASEBE",
-    "kurter": "YONETICI"
-}
-if "auth" not in st.session_state:
-    st.session_state.auth = None
-def login():
-    inject_theme_css(st.session_state.theme_mode)
-    col1, col2, col3 = st.columns([1, 1.3, 1])
-    with col2:
-        st.markdown(f"<div class='card'>", unsafe_allow_html=True)
-        st.title(APP_TITLE)
-        st.markdown("<div class='muted'>Güvenli giriş</div>", unsafe_allow_html=True)
-        with st.form("login"):
-            pwd = st.text_input("Şifre", type="password")
-            submit = st.form_submit_button("Giriş")
-            if submit:
-                if pwd in ROLES:
-                    st.session_state.auth = ROLES[pwd]
-                    st.rerun()
-                else:
-                    st.error("Hatalı şifre")
-        st.markdown("</div>", unsafe_allow_html=True)
-if not st.session_state.auth:
-    login()
-    st.stop()
-ROLE = st.session_state.auth
-# -------------------------
-# GEMINI CONFIG
-# -------------------------
-GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
-if not GEMINI_API_KEY:
-    inject_theme_css(st.session_state.theme_mode)
-    st.error("GEMINI_API_KEY bulunamadı. Streamlit Secrets içine ekleyin.")
-    st.stop()
-genai.configure(api_key=GEMINI_API_KEY)
-@st.cache_resource
-def get_model_name():
-    try:
-        available = [m.name for m in genai.list_models() if "generateContent" in getattr(m, "supported_generation_methods", [])]
-        for candidate in ["models/gemini-1.5-flash", "gemini-1.5-flash", "models/gemini-pro", "gemini-pro"]:
-            if candidate in available:
-                return candidate
-    except Exception:
-        pass
-    return "gemini-1.5-flash"
-MODEL_NAME = get_model_name()
-model = genai.GenerativeModel(MODEL_NAME)
-FALLBACK_MODELS = [
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
-    "gemini-pro",
-]
-def _generate_with_fallback(parts):
-    
-    """Try generate_content with a few model names to survive 404 / unsupported errors."""
-    last_err = None
-    tried = []
-    for name in [MODEL_NAME] + [m for m in FALLBACK_MODELS if m != MODEL_NAME]:
-        try:
-            tried.append(name)
-            m = genai.GenerativeModel(name)
-            resp = m.generate_content(parts)
-            return resp, name
-        except Exception as e:
-            last_err = e
-            continue
-    raise RuntimeError(f"AI çağrısı başarısız. Denenen modeller: {tried}. Son hata: {last_err}")
-def extract_response_text(response):
-    """
-    Gemini yanıtından güvenli şekilde text çıkarmaya çalışır.
-    """
-    try:
-        text = getattr(response, "text", "") or ""
-        if text and text.strip():
-            return text.strip()
-    except Exception:
-        pass
-    try:
-        candidates = getattr(response, "candidates", None)
-        if candidates:
-            parts = candidates[0].content.parts
-            collected = []
-            for p in parts:
-                t = getattr(p, "text", "")
-                if t:
-                    collected.append(t)
-            joined = "\n".join(collected).strip()
-            if joined:
-                return joined
-    except Exception:
-        pass
-    return ""
-# -------------------------
-# GSHEETS CONNECTION
-# -------------------------
-if GSheetsConnection is None:
-    inject_theme_css(st.session_state.theme_mode)
-    st.error("GSheetsConnection kütüphanesi bulunamadı. requirements.txt kontrol edin.")
-    st.stop()
-conn = st.connection("gsheets", type=GSheetsConnection)
-# -------------------------
-# COLUMN NORMALIZATION (Sayfa1)
-# -------------------------
-CANON_COLS = [
-    "kayit_tarihi", "belge_tarihi", "firma_adi", "evrak_tipi", "evrak_no",
-    "vergi_kimlik_no", "para_birimi", "ara_toplam", "kdv_orani", "kdv_tutari",
-    "genel_toplam", "kategori", "odeme_durumu", "aciklama", "ham_metin",
-    "kaynak_dosya", "created_at", "updated_at"
-]
-def normalize_sheet(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        out = pd.DataFrame(columns=CANON_COLS)
-        out["Belge_Date"] = pd.NaT
-        return out
-    df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
-    for c in CANON_COLS:
-        if c not in df.columns:
-            df[c] = ""
-    df = df[CANON_COLS].copy()
-    for col in ["ara_toplam", "kdv_orani", "kdv_tutari", "genel_toplam"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-    df["Belge_Date"] = pd.to_datetime(df["belge_tarihi"], dayfirst=True, errors="coerce")
-    df["para_birimi"] = df["para_birimi"].astype(str).str.strip().replace({"": "TL"}).fillna("TL")
-    df["odeme_durumu"] = df["odeme_durumu"].astype(str).str.strip().replace({"": "Beklemede"}).fillna("Beklemede")
-    return df
-def build_invoice_record(parsed: dict | None, ocr_text: str = "", source_name: str = "") -> dict:
-    parsed = parsed or {}
-    now = datetime.now()
-    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
-    today_str = now.strftime("%d.%m.%Y")
-    belge_tarihi = normalize_date(parsed.get("Vade", parsed.get("belge_tarihi", "")))
-    genel_toplam = normalize_amount(parsed.get("Tutar", parsed.get("genel_toplam", 0)))
-    para_birimi = normalize_currency(parsed.get("Döviz", parsed.get("para_birimi", "TL")))
-    return {
-        "kayit_tarihi": today_str,
-        "belge_tarihi": belge_tarihi,
-        "firma_adi": str(parsed.get("Firma Adı", parsed.get("firma_adi", ""))).strip(),
-        "evrak_tipi": str(parsed.get("Evrak Tipi", parsed.get("evrak_tipi", "Fatura"))).strip() or "Fatura",
-        "evrak_no": str(parsed.get("Evrak No", parsed.get("evrak_no", ""))).strip(),
-        "vergi_kimlik_no": str(parsed.get("Vergi Kimlik No", parsed.get("vergi_kimlik_no", ""))).strip(),
-        "para_birimi": para_birimi,
-        "ara_toplam": normalize_amount(parsed.get("Ara Toplam", parsed.get("ara_toplam", 0))),
-        "kdv_orani": normalize_amount(parsed.get("KDV Oranı", parsed.get("kdv_orani", 0))),
-        "kdv_tutari": normalize_amount(parsed.get("KDV Tutarı", parsed.get("kdv_tutari", 0))),
-        "genel_toplam": genel_toplam,
-        "kategori": str(parsed.get("Kategori", parsed.get("kategori", ""))).strip(),
-        "odeme_durumu": str(parsed.get("Durum", parsed.get("odeme_durumu", "Beklemede"))).strip() or "Beklemede",
-        "aciklama": (lambda _a: "" if len(_a) > 80 or "\n" in _a else _a)(str(parsed.get("Açıklama", parsed.get("aciklama", ""))).strip()),
-        "ham_metin": (ocr_text or str(parsed.get("ham_metin", ""))).strip(),
-        "kaynak_dosya": source_name,
-        "created_at": now_str,
-        "updated_at": now_str,
-    }
-def render_invoice_review_form(result: dict, key_prefix: str = "rev") -> dict:
-    """Render editable invoice form and return normalized dict in legacy field names.
-    This keeps build_invoice_record compatible while letting user correct all important fields.
-    """
-    result = result or {}
-    belge_tarihi_default = result.get("Vade", result.get("belge_tarihi", datetime.now().strftime("%d.%m.%Y")))
-    firma_default = result.get("Firma Adı", result.get("firma_adi", ""))
-    evrak_tipi_default = result.get("Evrak Tipi", result.get("evrak_tipi", "Fatura")) or "Fatura"
-    evrak_no_default = result.get("Evrak No", result.get("evrak_no", ""))
-    vergi_default = result.get("Vergi Kimlik No", result.get("vergi_kimlik_no", ""))
-    para_default = normalize_currency(result.get("Döviz", result.get("para_birimi", "TL")))
-    ara_default = normalize_amount(result.get("Ara Toplam", result.get("ara_toplam", 0)))
-    kdv_oran_default = normalize_amount(result.get("KDV Oranı", result.get("kdv_orani", 0)))
-    kdv_tutar_default = normalize_amount(result.get("KDV Tutarı", result.get("kdv_tutari", 0)))
-    genel_default = normalize_amount(result.get("Tutar", result.get("genel_toplam", 0)))
-    kategori_default = result.get("Kategori", result.get("kategori", ""))
-    durum_default = result.get("Durum", result.get("odeme_durumu", "Beklemede")) or "Beklemede"
-    aciklama_default = result.get("Açıklama", result.get("aciklama", ""))
-    tip_options = ["Fatura", "e-Fatura", "e-Arşiv", "Gider Pusulası", "Diğer"]
-    if evrak_tipi_default not in tip_options:
-        tip_options.append(evrak_tipi_default)
-    para_options = ["TL", "USD", "EUR"]
-    if para_default not in para_options:
-        para_options.append(para_default)
-    durum_options = ["Beklemede", "Ödendi"]
-    if durum_default not in durum_options:
-        durum_options.append(durum_default)
-    kategori_options = ["", "Ofis Gideri", "Yazılım", "Kargo", "Reklam", "Yemek", "Demirbaş", "Diğer"]
-    if kategori_default and kategori_default not in kategori_options:
-        kategori_options.append(kategori_default)
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        firma_adi = st.text_input("Firma Adı", value=firma_default, key=f"{key_prefix}_firma")
-        evrak_tipi = st.selectbox("Evrak Tipi", tip_options, index=tip_options.index(evrak_tipi_default), key=f"{key_prefix}_tip")
-        evrak_no = st.text_input("Evrak No", value=evrak_no_default, key=f"{key_prefix}_no")
-    with c2:
-        belge_tarihi = st.text_input("Belge Tarihi", value=belge_tarihi_default, key=f"{key_prefix}_tarih")
-        para_birimi = st.selectbox("Para Birimi", para_options, index=para_options.index(para_default), key=f"{key_prefix}_para")
-        genel_toplam = st.number_input("Genel Toplam", value=float(genel_default), step=100.0, key=f"{key_prefix}_genel")
-    with c3:
-        vergi_kimlik_no = st.text_input("Vergi Kimlik No", value=vergi_default, key=f"{key_prefix}_vkn")
-        kategori = st.selectbox("Kategori", kategori_options, index=kategori_options.index(kategori_default), key=f"{key_prefix}_kategori")
-        odeme_durumu = st.selectbox("Ödeme Durumu", durum_options, index=durum_options.index(durum_default), key=f"{key_prefix}_durum")
-    d1, d2, d3 = st.columns(3)
-    with d1:
-        ara_toplam = st.number_input("Ara Toplam", value=float(ara_default), step=100.0, key=f"{key_prefix}_ara")
-    with d2:
-        kdv_orani = st.number_input("KDV Oranı", value=float(kdv_oran_default), step=1.0, key=f"{key_prefix}_kdv_oran")
-    with d3:
-        kdv_tutari = st.number_input("KDV Tutarı", value=float(kdv_tutar_default), step=10.0, key=f"{key_prefix}_kdv_tutar")
-    aciklama = st.text_area("Açıklama", value=aciklama_default, key=f"{key_prefix}_aciklama")
-    return {
-        "Firma Adı": firma_adi,
-        "Evrak Tipi": evrak_tipi,
-        "Evrak No": evrak_no,
-        "Vergi Kimlik No": vergi_kimlik_no,
-        "Döviz": para_birimi,
-        "Ara Toplam": ara_toplam,
-        "KDV Oranı": kdv_orani,
-        "KDV Tutarı": kdv_tutari,
-        "Tutar": genel_toplam,
-        "Vade": belge_tarihi,
-        "Kategori": kategori,
-        "Durum": odeme_durumu,
-        "Açıklama": aciklama,
-    }
-# -------------------------
-# DATA LOAD / SAVE
-# -------------------------
-@st.cache_data(ttl=30)
-def load_data():
-    try:
-        raw = read_sheet(conn, worksheet=WORKSHEET_NAME)
-        # Bazı kurulumlarda worksheet adı desteklenmeyebilir veya farklı olabilir.
-        if raw is None or raw.empty:
-            raw = read_sheet(conn)
-        st.session_state["_gsheets_last_error"] = ""
-        return normalize_sheet(raw)
-    except Exception as e:
-        try:
-            raw = read_sheet(conn)
-            st.session_state["_gsheets_last_error"] = f"Worksheet fallback kullanıldı: {e}"
-            return normalize_sheet(raw)
-        except Exception as e2:
-            st.session_state["_gsheets_last_error"] = f"{e} | fallback: {e2}"
-            return normalize_sheet(pd.DataFrame(columns=CANON_COLS))
-def save_data(df: pd.DataFrame):
-    try:
-        cleaned = normalize_sheet(df).drop(columns=["Belge_Date"], errors="ignore")
-        replace_sheet(conn, cleaned[CANON_COLS], worksheet=WORKSHEET_NAME)
-        st.cache_data.clear()
-        return True, ""
-    except Exception as e:
-        logging.exception(e)
-        return False, str(e)
-def save_single_record(record: dict):
-    """Append one normalized record directly to Google Sheets.
-    This avoids stale cached df / full-sheet overwrite issues in AI save flows.
-    """
-    try:
-        clean = {col: record.get(col, "") for col in SHEET_COLUMNS}
-        append_row(conn, clean, worksheet=WORKSHEET_NAME)
-        st.cache_data.clear()
-        return True, ""
-    except Exception as e:
-        logging.exception(e)
-        return False, str(e)
-
-def save_many_records(records: list[dict]):
-    """Append many records one by one using the exact same path as manual save.
-    This avoids auth/path differences between manual and bulk writes.
-    """
-    try:
-        if not records:
-            return True, ""
-        failures = []
-        for idx, record in enumerate(records, start=1):
-            ok, err = save_single_record(record)
-            if not ok:
-                failures.append(f"{idx}. kayıt: {err}")
-        if failures:
-            return False, " | ".join(failures[:3])
-        st.cache_data.clear()
-        return True, ""
-    except Exception as e:
-        logging.exception(e)
-        return False, str(e)
+st.set_page_config(page_title="Fatura Tara → Excel", page_icon="📄", layout="wide")
 
 
-
-
-@st.cache_data(ttl=30)
-def load_corrections_data():
-    try:
-        raw = conn.read(worksheet=CORRECTIONS_WORKSHEET)
-        if raw is None or getattr(raw, "empty", True):
-            return pd.DataFrame(columns=CORRECTIONS_COLUMNS)
-        dfc = pd.DataFrame(raw).copy()
-        dfc.columns = [str(c).strip() for c in dfc.columns]
-        for col in CORRECTIONS_COLUMNS:
-            if col not in dfc.columns:
-                dfc[col] = ""
-        dfc = dfc[CORRECTIONS_COLUMNS].copy()
-        dfc = dfc.replace(r"^\s*$", pd.NA, regex=True).dropna(how="all").fillna("")
-        return dfc
-    except Exception:
-        return pd.DataFrame(columns=CORRECTIONS_COLUMNS)
-
-
-def append_correction_record(record: dict):
-    try:
-        current = load_corrections_data()
-        clean = {col: record.get(col, "") for col in CORRECTIONS_COLUMNS}
-        updated = pd.concat([current, pd.DataFrame([clean])], ignore_index=True)
-        conn.update(worksheet=CORRECTIONS_WORKSHEET, data=updated)
-        st.cache_data.clear()
-        return True, ""
-    except Exception as e:
-        logging.exception(e)
-        return False, str(e)
-
-
-def apply_vendor_enrichment(result: dict | None, raw_text: str = "") -> dict | None:
-    if not result:
-        return result
-    try:
-        corrections_df = load_corrections_data()
-    except Exception:
-        corrections_df = pd.DataFrame(columns=CORRECTIONS_COLUMNS)
-    canonical = {
-        "firma_adi": (result.get("Firma Adı") or result.get("firma_adi") or "").strip(),
-        "kategori": (result.get("Kategori") or result.get("kategori") or "").strip(),
-        "aciklama": (result.get("Açıklama") or result.get("aciklama") or "").strip(),
-    }
-    enriched = enrich_invoice_fields(canonical, raw_text=raw_text or "", corrections_df=corrections_df)
-    out = dict(result)
-    if enriched.get("firma_adi"):
-        out["Firma Adı"] = enriched.get("firma_adi")
-        out["firma_adi"] = enriched.get("firma_adi")
-    if enriched.get("kategori"):
-        out["Kategori"] = enriched.get("kategori")
-        out["kategori"] = enriched.get("kategori")
-    if enriched.get("rule_source"):
-        out["Kural Kaynağı"] = enriched.get("rule_source")
-        out["rule_source"] = enriched.get("rule_source")
-    return out
-
-
-def maybe_store_correction(source_name: str, original_result: dict | None, edited_result: dict | None, raw_text: str = ""):
-    original_result = original_result or {}
-    edited_result = edited_result or {}
-    raw_vendor = str(original_result.get("Firma Adı") or original_result.get("firma_adi") or "").strip()
-    corrected_vendor = str(edited_result.get("Firma Adı") or edited_result.get("firma_adi") or "").strip()
-    raw_category = str(original_result.get("Kategori") or original_result.get("kategori") or "").strip()
-    corrected_category = str(edited_result.get("Kategori") or edited_result.get("kategori") or "").strip()
-    if raw_vendor == corrected_vendor and raw_category == corrected_category:
-        return True, ""
-    record = build_correction_record(
-        source_name=source_name or "",
-        raw_vendor=raw_vendor,
-        corrected_vendor=corrected_vendor,
-        raw_category=raw_category,
-        corrected_category=corrected_category,
-        raw_text=raw_text or "",
-        note="manuel duzeltme",
-    )
-    return append_correction_record(record)
-
-
-def run_write_test_record():
-    now = datetime.now()
-    test_record = {
-        "kayit_tarihi": now.strftime("%d.%m.%Y"),
-        "belge_tarihi": now.strftime("%d.%m.%Y"),
-        "firma_adi": "WRITE_TEST",
-        "evrak_tipi": "Test",
-        "evrak_no": f"TEST-{now.strftime('%H%M%S')}",
-        "vergi_kimlik_no": "",
-        "para_birimi": "TL",
-        "ara_toplam": 1,
-        "kdv_orani": 0,
-        "kdv_tutari": 0,
-        "genel_toplam": 1,
-        "kategori": "Test",
-        "odeme_durumu": "Beklemede",
-        "aciklama": "Sheets yazma testi",
-        "ham_metin": "",
-        "kaynak_dosya": "write_test",
-        "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
-        "updated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    return save_single_record(test_record)
-
-# -------------------------
-# FX RATES
-# -------------------------
-@st.cache_data(ttl=300)
-def get_fx():
-    def _safe_rate(ticker: str, fallback: float) -> float:
-        try:
-            fx = yf.download(ticker, period="5d", progress=False, auto_adjust=False, threads=False)
-            if fx is None or fx.empty or "Close" not in fx.columns:
-                return fallback
-            close = fx["Close"].dropna()
-            if close.empty:
-                return fallback
-            return float(close.iloc[-1])
-        except Exception as e:
-            logging.warning("FX rate fetch failed for %s; fallback kullanılacak.", ticker)
-            return fallback
-    usd = _safe_rate("USDTRY=X", 34.90)
-    eur = _safe_rate("EURTRY=X", 37.80)
-    return usd, eur
-def compute_tl(df: pd.DataFrame, usd: float, eur: float) -> pd.DataFrame:
-    dfx = df.copy()
-    kur_map = {
-        "USD": usd, "USDT": usd, "DOLAR": usd, "Dolar": usd, "Dolar ": usd,
-        "EUR": eur, "EURO": eur, "Euro": eur, "Euro ": eur,
-        "TL": 1, "TRY": 1, "₺": 1
-    }
-    dfx["kur"] = dfx["para_birimi"].map(kur_map).fillna(1)
-    dfx["Tutar_TL"] = pd.to_numeric(dfx["genel_toplam"], errors="coerce").fillna(0) * dfx["kur"]
-    return dfx
-# -------------------------
-# OCR / AI INVOICE PARSE
-# -------------------------
-from PIL import ImageOps, ImageEnhance, ImageFilter
-def pdf_first_page_to_image(pdf_bytes: bytes, dpi: int = 350) -> Image.Image:
-    pages = convert_from_bytes(pdf_bytes, dpi=dpi, fmt="png")
-    return pages[0].convert("RGB")
-def enhance_for_reading(img: Image.Image) -> Image.Image:
-    g = ImageOps.grayscale(img)
-    g = ImageEnhance.Contrast(g).enhance(1.8)
-    g = ImageEnhance.Sharpness(g).enhance(2.0)
-    g = g.filter(ImageFilter.MedianFilter(size=3))
-    return g.convert("RGB")
-def decode_qr_opencv(img: Image.Image) -> list[str]:
-    try:
-        import cv2
-        import numpy as np
-        arr = np.array(img.convert("RGB"))
-        bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-        bgr = cv2.resize(bgr, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-        detector = cv2.QRCodeDetector()
-        data, points, _ = detector.detectAndDecode(bgr)
-        if data and data.strip():
-            return [data.strip()]
-        return []
-    except Exception:
-        return []
-def ocr_read(image: Image.Image) -> str:
-    if not OCR_ENABLED:
-        return ""
-    try:
-        return pytesseract.image_to_string(image)
-    except Exception:
-        return ""
-def parse_invoice_from_qr(qr_text: str) -> dict | None:
-    if not qr_text:
-        return None
-    try:
-        data = json.loads(qr_text)
-    except Exception:
-        return None
-    kdv_orani = 0.0
-    kdv_tutari = 0.0
-    for key, value in data.items():
-        if isinstance(key, str) and key.startswith("hesaplanankdv("):
-            kdv_tutari = normalize_amount(value)
-        if isinstance(key, str) and key.startswith("kdvmatrah("):
-            try:
-                kdv_orani = normalize_amount(key.split("kdvmatrah(")[1].split(")")[0])
-            except Exception:
-                pass
-    return {
-        "Firma Adı": "",
-        "Evrak Tipi": "Fatura",
-        "Tutar": normalize_amount(data.get("odenecek", data.get("vergidahil", 0))),
-        "Vade": normalize_date(data.get("tarih", "")),
-        "Açıklama": f"QR senaryo: {data.get('senaryo', '')} / tip: {data.get('tip', '')}".strip(" /"),
-        "Evrak No": str(data.get("no", "")).strip(),
-        "Döviz": normalize_currency(data.get("parabirimi", "TL")),
-        "Vergi Kimlik No": str(data.get("avkntckn", "") or data.get("vknckn", "")).strip(),
-        "Ara Toplam": normalize_amount(data.get("malhizmettoplam", 0)),
-        "KDV Oranı": kdv_orani,
-        "KDV Tutarı": kdv_tutari,
-    }
-# -------------------------
-# FX RATES
-# -------------------------
-@st.cache_data(ttl=300)
-def get_fx():
-    def _safe_rate(ticker: str, fallback: float) -> float:
-        try:
-            fx = yf.download(ticker, period="5d", progress=False, auto_adjust=False, threads=False)
-            if fx is None or fx.empty or "Close" not in fx.columns:
-                return fallback
-            close = fx["Close"].dropna()
-            if close.empty:
-                return fallback
-            return float(close.iloc[-1])
-        except Exception as e:
-            logging.warning("FX rate fetch failed for %s; fallback kullanılacak.", ticker)
-            return fallback
-    usd = _safe_rate("USDTRY=X", 34.90)
-    eur = _safe_rate("EURTRY=X", 37.80)
-    return usd, eur
-def compute_tl(df: pd.DataFrame, usd: float, eur: float) -> pd.DataFrame:
-    dfx = df.copy()
-    kur_map = {
-        "USD": usd, "USDT": usd, "DOLAR": usd, "Dolar": usd, "Dolar ": usd,
-        "EUR": eur, "EURO": eur, "Euro": eur, "Euro ": eur,
-        "TL": 1, "TRY": 1, "₺": 1
-    }
-    dfx["kur"] = dfx["para_birimi"].map(kur_map).fillna(1)
-    dfx["Tutar_TL"] = pd.to_numeric(dfx["genel_toplam"], errors="coerce").fillna(0) * dfx["kur"]
-    return dfx
-# -------------------------
-# OCR / AI INVOICE PARSE
-# -------------------------
-from PIL import ImageOps, ImageEnhance, ImageFilter
-def pdf_first_page_to_image(pdf_bytes: bytes, dpi: int = 350) -> Image.Image:
-    pages = convert_from_bytes(pdf_bytes, dpi=dpi, fmt="png")
-    return pages[0].convert("RGB")
-def enhance_for_reading(img: Image.Image) -> Image.Image:
-    g = ImageOps.grayscale(img)
-    g = ImageEnhance.Contrast(g).enhance(1.8)
-    g = ImageEnhance.Sharpness(g).enhance(2.0)
-    g = g.filter(ImageFilter.MedianFilter(size=3))
-    return g.convert("RGB")
-def decode_qr_opencv(img: Image.Image) -> list[str]:
-    try:
-        import cv2
-        import numpy as np
-        arr = np.array(img.convert("RGB"))
-        bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-        bgr = cv2.resize(bgr, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-        detector = cv2.QRCodeDetector()
-        data, points, _ = detector.detectAndDecode(bgr)
-        if data and data.strip():
-            return [data.strip()]
-        return []
-    except Exception:
-        return []
-def ocr_read(image: Image.Image) -> str:
-    if not OCR_ENABLED:
-        return ""
-    try:
-        return pytesseract.image_to_string(image)
-    except Exception:
-        return ""
-def parse_invoice_from_qr(qr_text: str) -> dict | None:
-    if not qr_text:
-        return None
-    try:
-        data = json.loads(qr_text)
-    except Exception:
-        return None
-    kdv_orani = 0.0
-    kdv_tutari = 0.0
-    for key, value in data.items():
-        if isinstance(key, str) and key.startswith("hesaplanankdv("):
-            kdv_tutari = normalize_amount(value)
-        if isinstance(key, str) and key.startswith("kdvmatrah("):
-            try:
-                kdv_orani = normalize_amount(key.split("kdvmatrah(")[1].split(")")[0])
-            except Exception:
-                pass
-    return {
-        "Firma Adı": "",
-        "Evrak Tipi": "Fatura",
-        "Tutar": normalize_amount(data.get("odenecek", data.get("vergidahil", 0))),
-        "Vade": normalize_date(data.get("tarih", "")),
-        "Açıklama": f"QR senaryo: {data.get('senaryo', '')} / tip: {data.get('tip', '')}".strip(" /"),
-        "Evrak No": str(data.get("no", "")).strip(),
-        "Döviz": normalize_currency(data.get("parabirimi", "TL")),
-        "Vergi Kimlik No": str(data.get("avkntckn", "") or data.get("vknckn", "")).strip(),
-        "Ara Toplam": normalize_amount(data.get("malhizmettoplam", 0)),
-        "KDV Oranı": kdv_orani,
-        "KDV Tutarı": kdv_tutari,
-    }
-def merge_invoice_data(primary: dict | None, secondary: dict | None) -> dict:
-    merged = dict(secondary or {})
-    for k, v in (primary or {}).items():
-        if v not in (None, "", 0, 0.0, []):
-            merged[k] = v
-    return merged
-
-def extract_pdf_text(pdf_bytes: bytes) -> str:
-    try:
-        import PyPDF2
-        reader = PyPDF2.PdfReader(BytesIO(pdf_bytes))
-        parts = []
-        for pg in reader.pages[:8]:
-            t = pg.extract_text() or ""
-            if t.strip():
-                parts.append(t)
-        return "\n".join(parts)[:20000]
-    except Exception as e:
-        logging.warning("PDF text extraction failed: %s", e)
-        return ""
-
-def _clean_ocr_text(text: str) -> str:
-    text = str(text or "").replace("\r", "\n")
-    text = re.sub(r"[ \t\xa0]+", " ", text)
-    text = re.sub(r"\n{2,}", "\n", text)
+def normalize_spaces(text: str) -> str:
+    text = text.replace("\xa0", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
-def _crop_rel(img: Image.Image, box: tuple[float, float, float, float], pad: float = 0.015) -> Image.Image:
-    w, h = img.size
-    x1, y1, x2, y2 = box
-    px = int(w * pad)
-    py = int(h * pad)
-    left = max(0, int(x1 * w) - px)
-    top = max(0, int(y1 * h) - py)
-    right = min(w, int(x2 * w) + px)
-    bottom = min(h, int(y2 * h) + py)
-    return img.crop((left, top, right, bottom))
 
-def _invoice_region_boxes() -> dict:
-    return {
-        "seller": (0.02, 0.14, 0.48, 0.35),
-        "buyer":  (0.02, 0.30, 0.48, 0.56),
-        "meta":   (0.64, 0.02, 0.98, 0.38),
-        "table":  (0.02, 0.40, 0.98, 0.70),
-        "totals": (0.50, 0.63, 0.98, 0.81),
-        "notes":  (0.02, 0.77, 0.98, 0.97),
-    }
-
-def extract_invoice_region_images(img: Image.Image, pad: float = 0.02) -> dict:
-    return {name: _crop_rel(img, box, pad=pad) for name, box in _invoice_region_boxes().items()}
-
-def extract_invoice_region_texts(img: Image.Image) -> dict:
-    regions = extract_invoice_region_images(img, pad=0.02)
-    texts = {}
-    for name, region in regions.items():
-        txt = ocr_read(enhance_for_reading(region))
-        texts[name] = _clean_ocr_text(txt)
-    return texts
-
-def _first_match(text: str, patterns: list[str]) -> str:
-    for pat in patterns:
-        m = re.search(pat, text, re.I | re.S)
-        if m:
-            return m.group(1).strip(" :-\n\t")
-    return ""
-
-def _extract_label_amount(text: str, labels: list[str]) -> float:
-    if not text:
-        return 0.0
-    joined = "|".join(labels)
-    patterns = [
-        rf"(?:{joined})\s*[:\-]?\s*([0-9][0-9\.,]+)",
-        rf"(?:{joined})[^0-9]{{0,25}}([0-9][0-9\.,]+)",
-    ]
-    for pat in patterns:
-        m = re.search(pat, text, re.I | re.S)
-        if m:
-            return normalize_amount(m.group(1))
-    return 0.0
-
-def _extract_party_name(block: str, stop_words: list[str]) -> str:
-    if not block:
+def normalize_date(value: str) -> str:
+    if not value:
         return ""
-    lines = [ln.strip(" .:-") for ln in block.splitlines() if ln.strip()]
-    for ln in lines:
-        low = ln.lower()
-        if any(sw in low for sw in stop_words):
-            continue
-        if re.search(r"\b(vkn|tckn|tel|faks|web|eposta|e-posta|vergi|mersis|ticaret)\b", low, re.I):
-            continue
-        if len(ln) >= 3:
-            return ln[:140]
+    value = value.strip()
+    value = value.replace("/", ".").replace("-", ".")
+    m = re.search(r"(\d{2})\.(\d{2})\.(\d{4})", value)
+    if m:
+        return f"{m.group(1)}.{m.group(2)}.{m.group(3)}"
+    m = re.search(r"(\d{4})\.(\d{2})\.(\d{2})", value)
+    if m:
+        return f"{m.group(3)}.{m.group(2)}.{m.group(1)}"
+    return value
+
+
+def normalize_amount(value: str) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip().upper()
+    s = s.replace("TL", "").replace("TRY", "").replace("₺", "")
+    s = s.replace(" ", "")
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        s = s.replace(".", "").replace(",", ".")
+    m = re.search(r"-?\d+(?:\.\d+)?", s)
+    return float(m.group(0)) if m else 0.0
+
+
+def amount_to_text(v) -> str:
+    try:
+        num = float(v)
+    except Exception:
+        return ""
+    return f"{num:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+FIELD_LABELS = {
+    "invoice_no": [r"Fatura No", r"Belge No", r"Evrak No"],
+    "invoice_date": [r"Fatura Tarihi", r"Belge Tarihi", r"Tarih"],
+    "order_no": [r"Sipariş No"],
+    "order_date": [r"Sipariş Tarihi"],
+    "payable_total": [r"Ödenecek Tutar", r"Vergiler Dahil Toplam Tutar", r"Genel Toplam"],
+    "subtotal": [r"Mal / Hizmet Toplam Tutarı", r"Mal/Hizmet Toplam Tutarı", r"Ara Toplam"],
+    "vat_amount": [r"Hesaplanan KDV", r"KDV Tutarı"],
+    "ettn": [r"ETTN"],
+}
+
+
+def find_value_after_label(text: str, labels: list[str], multiline: bool = False) -> str:
+    flags = re.IGNORECASE | re.MULTILINE
+    for label in labels:
+        if multiline:
+            pattern = rf"{label}\s*:?\s*(.+)"
+        else:
+            pattern = rf"{label}\s*:?\s*([^\n]+)"
+        m = re.search(pattern, text, flags)
+        if m:
+            return m.group(1).strip()
     return ""
 
-def parse_invoice_from_text(text: str) -> dict | None:
-    if not text or not text.strip():
-        return None
-    s = _clean_ocr_text(text)
-    compact = s
 
-    firma = _first_match(compact, [
-        r"(?:UNVAN|SATI[ÇC]I|SATICI|FIRMA|FİRMA)\s*[:\-]?\s*([^\n]{3,140})",
-        r"(?:SAYIN)\s*\n?([^\n]{3,140})",
-    ])
-    if not firma:
-        firma = _extract_party_name(s, stop_words=["sayin", "e-fatura", "fatura no", "fatura tarihi"])
 
-    evrak_no = _first_match(compact, [
-        r"FATURA\s*NO\s*[:\-]?\s*([A-Z0-9\-/]{6,40})",
-        r"(?:BELGE\s*NO|NO)\s*[:\-]?\s*([A-Z0-9\-/]{6,40})",
-        r"\b([A-Z]{2,6}20\d{2}[A-Z0-9\-]{4,24})\b",
-    ])
-
-    belge_tarihi = _first_match(compact, [
-        r"FATURA\s*TAR[İI]H[İI]\s*[:\-]?\s*(\d{2}[./-]\d{2}[./-]\d{4})",
-        r"TAR[İI]H\s*[:\-]?\s*(\d{2}[./-]\d{2}[./-]\d{4})",
-        r"\b(20\d{2}[./-]\d{2}[./-]\d{2})\b",
-    ])
-
-    vkn = _first_match(compact, [r"(?:VKN|VERG[İI]\s*K[İI]ML[İI]K\s*NO|TCKN)\s*[:\-]?\s*(\d{10,11})"])
-    ara_toplam = _extract_label_amount(compact, ["ARA\s*TOPLAM", "MAL\s*/?\s*H[İI]ZMET\s*TOPLAM", "MALH[İI]ZMETTOPLAM", "MAL\s*H[İI]ZMET\s*TOPLAM\s*TUTARI"])
-    kdv_tutari = _extract_label_amount(compact, ["HESAPLANAN\s*KDV", "KDV\s*TUTARI", "TOPLAM\s*KDV"])
-    genel_toplam = _extract_label_amount(compact, ["ÖDENECEK\s*TUTAR", "ODENECEK\s*TUTAR", "VERG[İI]\s*DAH[İI]L\s*TOPLAM\s*TUTAR", "GENEL\s*TOPLAM", "TOPLAM\s*TUTAR"])
-    kdv_oran = _first_match(compact, [r"KDV\s*(?:ORANI|ORAN)\s*[:\-]?\s*%?\s*(\d{1,2})", r"%\s*(\d{1,2})\s*KDV"])
-
-    if not genel_toplam and ara_toplam and kdv_tutari:
-        genel_toplam = ara_toplam + kdv_tutari
-    if not ara_toplam and genel_toplam and kdv_tutari:
-        ara_toplam = max(genel_toplam - kdv_tutari, 0)
-    if not kdv_tutari and ara_toplam and genel_toplam:
-        kdv_tutari = max(genel_toplam - ara_toplam, 0)
-    if not kdv_oran and ara_toplam and kdv_tutari:
+def extract_pdf_text(file_bytes: bytes) -> str:
+    texts = []
+    if PdfReader is not None:
         try:
-            kdv_oran = round((kdv_tutari / ara_toplam) * 100)
-        except Exception:
-            kdv_oran = 0
-
-    para = "TL"
-    if re.search(r"\bUSD\b|\$", compact, re.I):
-        para = "USD"
-    elif re.search(r"\bEUR\b|€", compact, re.I):
-        para = "EUR"
-
-    result = {
-        "Firma Adı": firma,
-        "Evrak Tipi": "Fatura",
-        "Tutar": genel_toplam,
-        "Vade": normalize_date(belge_tarihi),
-        "Açıklama": "",
-        "Evrak No": evrak_no,
-        "Döviz": normalize_currency(para),
-        "Vergi Kimlik No": vkn,
-        "Ara Toplam": ara_toplam,
-        "KDV Oranı": normalize_amount(kdv_oran or 0),
-        "KDV Tutarı": kdv_tutari,
-        "Durum": "Beklemede",
-    }
-    useful = [result.get("Firma Adı"), result.get("Evrak No"), result.get("Vergi Kimlik No"), result.get("Tutar")]
-    return result if any(v not in ("", 0, 0.0, None) for v in useful) else None
-
-def parse_invoice_from_regions(region_texts: dict, full_text: str = "") -> dict | None:
-    seller_text = _clean_ocr_text(region_texts.get("seller", ""))
-    buyer_text = _clean_ocr_text(region_texts.get("buyer", ""))
-    meta_text = _clean_ocr_text(region_texts.get("meta", ""))
-    table_text = _clean_ocr_text(region_texts.get("table", ""))
-    totals_text = _clean_ocr_text(region_texts.get("totals", ""))
-    notes_text = _clean_ocr_text(region_texts.get("notes", ""))
-    all_text = "\n".join([seller_text, buyer_text, meta_text, table_text, totals_text, notes_text, _clean_ocr_text(full_text)])
-
-    firma = _extract_party_name(seller_text, stop_words=["sayin", "e-fatura", "ozellestirme", "senaryo", "fatura no", "fatura tarihi"])
-    if not firma:
-        firma = _extract_party_name(all_text, stop_words=["sayin", "e-fatura", "ozellestirme", "senaryo", "fatura no", "fatura tarihi"])
-
-    buyer = _extract_party_name(buyer_text, stop_words=["e-posta", "tel", "vergi", "vkn", "sayin"])
-    if not buyer:
-        m_buyer = re.search(r"SAYIN\s*\n?([^\n]{3,140})", buyer_text + "\n" + all_text, re.I)
-        if m_buyer:
-            buyer = m_buyer.group(1).strip()
-
-    evrak_no = _first_match(meta_text + "\n" + all_text, [
-        r"FATURA\s*NO\s*[:\-]?\s*([A-Z0-9\-/]{6,40})",
-        r"\b([A-Z]{2,6}20\d{2}[A-Z0-9\-]{4,24})\b",
-    ])
-    belge_tarihi = _first_match(meta_text + "\n" + all_text, [
-        r"FATURA\s*TAR[İI]H[İI]\s*[:\-]?\s*(\d{2}[./-]\d{2}[./-]\d{4})",
-        r"TAR[İI]H\s*[:\-]?\s*(\d{2}[./-]\d{2}[./-]\d{4})",
-    ])
-    order_no = _first_match(meta_text + "\n" + notes_text, [r"S[İI]PAR[İI][ŞS]\s*NO\s*[:\-]?\s*([A-Z0-9\-/]{6,40})"])
-
-    seller_vkn = _first_match(seller_text, [r"(?:VKN|VERG[İI]\s*K[İI]ML[İI]K\s*NO|TCKN)\s*[:\-]?\s*(\d{10,11})"])
-    buyer_vkn = _first_match(buyer_text, [r"(?:VKN|VERG[İI]\s*K[İI]ML[İI]K\s*NO|TCKN)\s*[:\-]?\s*(\d{10,11})"])
-    vkn = buyer_vkn or seller_vkn
-
-    ara_toplam = _extract_label_amount(totals_text + "\n" + all_text, ["MAL\s*/?\s*H[İI]ZMET\s*TOPLAM\s*TUTAR[Iİ]", "MAL\s*/?\s*H[İI]ZMET\s*TOPLAM", "ARA\s*TOPLAM"])
-    kdv_tutari = _extract_label_amount(totals_text + "\n" + all_text, ["HESAPLANAN\s*KDV", "KDV\(%?\s*\d+[\.,]?\d*\)", "KDV\s*TUTARI"])
-    genel_toplam = _extract_label_amount(totals_text + "\n" + all_text, ["ÖDENECEK\s*TUTAR", "VERG[İI]LER\s*DAH[İI]L\s*TOPLAM\s*TUTAR", "GENEL\s*TOPLAM"])
-    kdv_oran = _first_match(totals_text + "\n" + table_text + "\n" + all_text, [r"KDV\s*(?:ORANI|ORAN)\s*[:\-]?\s*%?\s*(\d{1,2})", r"%\s*(\d{1,2})\s*,?\d*\s*TL", r"%\s*(\d{1,2})\b"])
-
-    if not genel_toplam and ara_toplam and kdv_tutari:
-        genel_toplam = ara_toplam + kdv_tutari
-    if not ara_toplam and genel_toplam and kdv_tutari:
-        ara_toplam = max(genel_toplam - kdv_tutari, 0)
-    if not kdv_tutari and ara_toplam and genel_toplam:
-        kdv_tutari = max(genel_toplam - ara_toplam, 0)
-    if not kdv_oran and ara_toplam and kdv_tutari:
-        try:
-            kdv_oran = round((kdv_tutari / ara_toplam) * 100)
-        except Exception:
-            kdv_oran = 0
-
-    para = "TL"
-    if re.search(r"\bUSD\b|\$", all_text, re.I):
-        para = "USD"
-    elif re.search(r"\bEUR\b|€", all_text, re.I):
-        para = "EUR"
-
-    line_desc = ""
-    for ln in [ln.strip() for ln in table_text.splitlines() if ln.strip()]:
-        low = ln.lower()
-        if re.search(r"s[ıi]ra|barkod|malzeme|miktar|birim|iskonto|kdv|hizmet tutar", low):
-            continue
-        if len(ln) > 8 and not re.fullmatch(r"[0-9\.,% TLtladetADet-]+", ln):
-            line_desc = ln[:180]
-            break
-
-    aciklama_parts = []
-    if order_no:
-        aciklama_parts.append(f"Sipariş No: {order_no}")
-    if buyer:
-        aciklama_parts.append(f"Alıcı: {buyer}")
-    if line_desc:
-        aciklama_parts.append(f"Ürün: {line_desc}")
-    aciklama = " | ".join(aciklama_parts)[:220]
-
-    result = {
-        "Firma Adı": firma,
-        "Evrak Tipi": "e-Fatura" if re.search(r"e-?fatura", all_text, re.I) else "Fatura",
-        "Tutar": genel_toplam,
-        "Vade": normalize_date(belge_tarihi),
-        "Açıklama": aciklama,
-        "Evrak No": evrak_no,
-        "Döviz": normalize_currency(para),
-        "Vergi Kimlik No": vkn,
-        "Ara Toplam": ara_toplam,
-        "KDV Oranı": normalize_amount(kdv_oran or 0),
-        "KDV Tutarı": kdv_tutari,
-        "Durum": "Beklemede",
-        "Alıcı": buyer,
-    }
-    useful = [result.get("Firma Adı"), result.get("Evrak No"), result.get("Tutar"), result.get("Vade")]
-    return result if any(v not in ("", 0, 0.0, None) for v in useful) else None
-
-def sanitize_bulk_result(result: dict | None, raw_text: str = "") -> dict | None:
-    if not result:
-        return None
-    out = dict(result)
-    firma = str(out.get("Firma Adı", "") or out.get("firma_adi", "")).strip()
-    evrak_no = str(out.get("Evrak No", "") or out.get("evrak_no", "")).strip()
-    aciklama = str(out.get("Açıklama", "") or out.get("aciklama", "")).strip()
-    try:
-        tutar = float(normalize_amount(out.get("Tutar", out.get("genel_toplam", 0))))
-    except Exception:
-        tutar = 0.0
-
-    suspicious_description = len(aciklama) > 140 or "\n" in aciklama or aciklama.lower().count("fatura") >= 2 or aciklama.lower().count("kdv") >= 2
-    if suspicious_description:
-        out["Açıklama"] = ""
-        out["aciklama"] = ""
-
-    if not firma and raw_text:
-        retry = parse_invoice_from_text(raw_text)
-        if retry and (retry.get("Firma Adı") or retry.get("Evrak No") or retry.get("Tutar")):
-            out = merge_invoice_data(retry, out)
-            firma = str(out.get("Firma Adı", "") or out.get("firma_adi", "")).strip()
-            evrak_no = str(out.get("Evrak No", "") or out.get("evrak_no", "")).strip()
-            try:
-                tutar = float(normalize_amount(out.get("Tutar", out.get("genel_toplam", 0))))
-            except Exception:
-                tutar = 0.0
-
-    if not firma and not evrak_no and tutar <= 0:
-        return None
-
-    if len(str(out.get("Açıklama", "") or out.get("aciklama", "")).strip()) > 80:
-        out["Açıklama"] = ""
-        out["aciklama"] = ""
-    return out
-
-def _needs_ai_fallback(result: dict | None) -> bool:
-    if not result:
-        return True
-    firma = str(result.get("Firma Adı", "") or result.get("firma_adi", "")).strip()
-    evrak_no = str(result.get("Evrak No", "") or result.get("evrak_no", "")).strip()
-    try:
-        tutar = float(normalize_amount(result.get("Tutar", result.get("genel_toplam", 0))))
-    except Exception:
-        tutar = 0.0
-    tarih = str(result.get("Vade", result.get("belge_tarihi", ""))).strip()
-    score = sum([1 if firma else 0, 1 if evrak_no else 0, 1 if tutar > 0 else 0, 1 if tarih else 0])
-    return score < 3
-
-def analyze_invoice_layout(image: Image.Image, region_texts: dict, merged_hint: dict | None = None, qr_list: list[str] | None = None, full_text: str = ""):
-    qr_list = qr_list or []
-    merged_hint = merged_hint or {}
-    prompt = f"""
-Sen Türkiye'deki e-Arşiv / e-Fatura düzenlerine hakim bir muhasebe asistanısın.
-Aşağıdaki metinler faturanın BELİRLİ BÖLGELERİNDEN geldi:
-- seller: sol üst satıcı alanı
-- buyer: satıcının altındaki SAYIN/alıcı alanı
-- meta: sağ üst QR altı fatura bilgileri
-- table: orta ürün tablosu
-- totals: sağ alt toplam/kdv/ödenecek alanı
-- notes: alt açıklamalar alanı
-
-QR_VERI: {qr_list}
-REGION_TEXTS: {json.dumps(region_texts, ensure_ascii=False)[:8000]}
-MEVCUT_BULGULAR: {json.dumps(merged_hint, ensure_ascii=False)[:2000]}
-FULL_TEXT: {full_text[:3000]}
-
-Kurallar:
-- Önce region metinlerine güven, sonra QR, en son full text.
-- Tahmin uydurma.
-- Açıklama alanını kısa tut; tüm OCR metnini yazma.
-- Firma Adı satıcıdır, alıcı değildir.
-- Vade alanına fatura tarihini yaz.
-- Tutar KDV dahil ödenecek tutardır.
-
-Sadece geçerli JSON döndür:
-{
-  "firma_adi": "",
-  "evrak_tipi": "Fatura",
-  "tutar": 0,
-  "vade": "DD.MM.YYYY",
-  "aciklama": "",
-  "evrak_no": "",
-  "doviz": "TL",
-  "vergi_kimlik_no": "",
-  "ara_toplam": 0,
-  "kdv_orani": 0,
-  "kdv_tutari": 0
-}
-"""
-    try:
-        response, _ = _generate_with_fallback([prompt])
-        data = safe_json_loads(extract_response_text(response))
-        if not data:
-            return None
-        return {
-            "Firma Adı": str(data.get("firma_adi", "")).strip(),
-            "Evrak Tipi": str(data.get("evrak_tipi", "Fatura")).strip() or "Fatura",
-            "Tutar": normalize_amount(data.get("tutar", 0)),
-            "Vade": normalize_date(data.get("vade", "")),
-            "Açıklama": str(data.get("aciklama", "")).strip()[:220],
-            "Evrak No": str(data.get("evrak_no", "")).strip(),
-            "Döviz": normalize_currency(data.get("doviz", "TL")),
-            "Vergi Kimlik No": str(data.get("vergi_kimlik_no", "")).strip(),
-            "Ara Toplam": normalize_amount(data.get("ara_toplam", 0)),
-            "KDV Oranı": normalize_amount(data.get("kdv_orani", 0)),
-            "KDV Tutarı": normalize_amount(data.get("kdv_tutari", 0)),
-            "Durum": "Beklemede",
-        }
-    except Exception:
-        logging.exception("Layout AI fallback failed")
-        return None
-
-def process_uploaded_invoice_bytes(file_bytes: bytes, source_name: str = "", file_type: str = "", do_ocr: bool = False) -> dict:
-    raw_image = None
-    image = None
-    ocr_text = ""
-    qr_list = []
-    region_texts = {}
-    try:
-        is_pdf = (file_type == "application/pdf") or source_name.lower().endswith(".pdf")
-        if is_pdf:
-            if PDF_ENABLED:
-                try:
-                    raw_image = pdf_first_page_to_image(file_bytes, dpi=350)
-                except Exception as e:
-                    logging.warning("PDF first page image failed for %s: %s", source_name, e)
-            ocr_text = extract_pdf_text(file_bytes)
-        else:
-            raw_image = Image.open(BytesIO(file_bytes)).convert("RGB")
-
-        qr_result = None
-        text_result = None
-        region_result = None
-
-        if raw_image is not None:
-            image = enhance_for_reading(raw_image)
-            qr_list = decode_qr_opencv(raw_image) or decode_qr_opencv(image) or []
-            if do_ocr and OCR_ENABLED:
-                try:
-                    region_texts = extract_invoice_region_texts(raw_image)
-                    joined_regions = "\n\n".join([f"[{k}]\n{v}" for k, v in region_texts.items() if v.strip()])
-                    if joined_regions.strip():
-                        ocr_text = (ocr_text + "\n" + joined_regions).strip()
-                except Exception as e:
-                    logging.warning("Region OCR failed for %s: %s", source_name, e)
-                    try:
-                        ocr_piece = ocr_read(image)
-                        if ocr_piece.strip():
-                            ocr_text = (ocr_text + "\n" + ocr_piece).strip()
-                    except Exception as e2:
-                        logging.warning("Full OCR failed for %s: %s", source_name, e2)
-
-        if qr_list:
-            for qr in qr_list:
-                qr_result = parse_invoice_from_qr(qr)
-                if qr_result:
-                    break
-
-        if ocr_text.strip():
-            text_result = parse_invoice_from_text(ocr_text)
-        if region_texts:
-            region_result = parse_invoice_from_regions(region_texts, full_text=ocr_text)
-
-        merged_pre_ai = merge_invoice_data(region_result, merge_invoice_data(text_result, qr_result)) if (region_result or text_result or qr_result) else None
-
-        ai_result = None
-        if raw_image is not None and _needs_ai_fallback(merged_pre_ai):
-            ai_result = analyze_invoice_layout(raw_image, region_texts=region_texts, merged_hint=merged_pre_ai, qr_list=qr_list, full_text=ocr_text)
-            if not ai_result:
-                ai_result = analyze_invoice(image, ocr_text=ocr_text, qr_list=qr_list)
-        elif ocr_text.strip() and _needs_ai_fallback(merged_pre_ai):
-            ai_result = analyze_invoice_text_only(ocr_text, qr_list=qr_list)
-
-        result = merge_invoice_data(ai_result, merged_pre_ai) if (ai_result or merged_pre_ai) else None
-        return {
-            "source_name": source_name,
-            "raw_image": raw_image,
-            "image": image,
-            "ocr_text": ocr_text,
-            "qr_list": qr_list,
-            "region_texts": region_texts,
-            "result": result,
-            "error": "" if result else "Veri çıkarılamadı",
-        }
-    except Exception as e:
-        logging.exception(e)
-        return {
-            "source_name": source_name,
-            "raw_image": raw_image,
-            "image": image,
-            "ocr_text": ocr_text,
-            "qr_list": qr_list,
-            "region_texts": region_texts,
-            "result": None,
-            "error": str(e),
-        }
-
-def process_uploaded_invoice(uploaded_file, do_ocr: bool = False) -> dict:
-    source_name = getattr(uploaded_file, "name", "")
-    file_type = getattr(uploaded_file, "type", "") or ""
-    try:
-        file_bytes = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
-    except Exception:
-        try:
-            uploaded_file.seek(0)
+            reader = PdfReader(BytesIO(file_bytes))
+            for page in reader.pages:
+                texts.append(page.extract_text() or "")
         except Exception:
             pass
-        file_bytes = uploaded_file.read()
-    return process_uploaded_invoice_bytes(file_bytes, source_name=source_name, file_type=file_type, do_ocr=do_ocr)
+    if not "".join(texts).strip() and fitz is not None:
+        try:
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            for page in doc:
+                texts.append(page.get_text("text"))
+        except Exception:
+            pass
+    return normalize_spaces("\n".join(texts))
 
-def analyze_invoice(image: Image.Image, ocr_text: str = "", qr_list: list[str] | None = None):
-    qr_list = qr_list or []
-    prompt = f"""
-Sen bir finans muhasebe asistanısın. Bu görsel bir fatura / e-fatura olabilir.
-ELİNDE QR/ OCR varsa bunları mutlaka kullan:
-QR_VERI: {qr_list}
-OCR_METIN: {ocr_text[:4000]}
-Sadece geçerli bir JSON nesnesi döndür.
-Açıklama, markdown, kod bloğu ekleme.
-Şema:
-{{
-  "firma_adi": "",
-  "evrak_tipi": "Fatura",
-  "tutar": 0,
-  "vade": "DD.MM.YYYY",
-  "aciklama": "",
-  "evrak_no": "",
-  "doviz": "TL",
-  "vergi_kimlik_no": "",
-  "ara_toplam": 0,
-  "kdv_orani": 0,
-  "kdv_tutari": 0
-}}
-Notlar:
-- vade yoksa fatura tarihini vade olarak yaz.
-- tutarı KDV dahil toplam ödenecek tutar olarak yakala.
-- dövizi bulamazsan TL yaz.
-- evrak_no: fatura no.
-- firma_adi satıcıdır.
-- Açıklama kısa olsun; tüm metni kopyalama.
-- Eğer bir alan bulunamazsa boş string döndür. Tahmin uydurma.
-"""
+
+
+def ocr_image(pil_image) -> str:
+    if pytesseract is None:
+        return ""
+    return pytesseract.image_to_string(pil_image, lang="eng")
+
+
+
+def ocr_pdf(file_bytes: bytes, dpi: int = 300, max_pages: int = 3) -> str:
+    if convert_from_bytes is None or pytesseract is None:
+        return ""
+    texts = []
     try:
-        response, used_model = _generate_with_fallback([prompt, image])
-        text = extract_response_text(response)
-        data = safe_json_loads(text)
-        if not data and ocr_text:
-            logging.warning("Gorsel+prompt parse edilemedi, text-only fallback deneniyor.")
-            return analyze_invoice_text_only(ocr_text, qr_list=qr_list)
-        if not data:
-            logging.warning("Image AI response parse edilemedi: %s", text[:1000])
-            return None
-        return {
-            "Firma Adı": str(data.get("firma_adi", "")).strip(),
-            "Evrak Tipi": str(data.get("evrak_tipi", "Fatura")).strip() or "Fatura",
-            "Banka": "",
-            "Tutar": normalize_amount(data.get("tutar", 0)),
-            "Vade": normalize_date(data.get("vade", "")),
-            "Açıklama": str(data.get("aciklama", "")).strip()[:220],
-            "Çeki veren": "",
-            "Cirolu": "",
-            "Asıl borçlu": "",
-            "Kime verildi": "",
-            "Evrak No": str(data.get("evrak_no", "")).strip(),
-            "Döviz": normalize_currency(data.get("doviz", "TL")),
-            "Vergi Kimlik No": str(data.get("vergi_kimlik_no", "")).strip(),
-            "Ara Toplam": normalize_amount(data.get("ara_toplam", 0)),
-            "KDV Oranı": normalize_amount(data.get("kdv_orani", 0)),
-            "KDV Tutarı": normalize_amount(data.get("kdv_tutari", 0)),
-            "Durum": "Beklemede"
-        }
-    except Exception as e:
-        logging.exception(e)
-        return None
-
-def analyze_invoice_text_only(ocr_text: str, qr_list: list[str] | None = None):
-    qr_list = qr_list or []
-    prompt = f"""
-Sen bir finans muhasebe asistanısın. Elinde sadece metin var (PDF içi metin/OCR).
-QR_VERI: {qr_list}
-OCR_METIN:
-{ocr_text[:8000]}
-Sadece geçerli bir JSON nesnesi döndür.
-Açıklama, markdown, kod bloğu ekleme.
-Şema:
-{{
-  "firma_adi": "",
-  "evrak_tipi": "Fatura",
-  "tutar": 0,
-  "vade": "DD.MM.YYYY",
-  "aciklama": "",
-  "evrak_no": "",
-  "doviz": "TL",
-  "vergi_kimlik_no": "",
-  "ara_toplam": 0,
-  "kdv_orani": 0,
-  "kdv_tutari": 0
-}}
-Notlar:
-- vade yoksa fatura tarihini vade olarak yaz.
-- tutarı KDV dahil toplam ödenecek tutar olarak yakala.
-- dövizi bulamazsan TL yaz.
-- evrak_no: fatura no.
-- firma_adi satıcıdır.
-- Açıklama kısa olsun; tüm metni kopyalama.
-- Eğer bir alan bulunamazsa boş string döndür. Tahmin uydurma.
-"""
-    try:
-        response, used_model = _generate_with_fallback([prompt])
-        text = extract_response_text(response)
-        data = safe_json_loads(text)
-        if not data:
-            logging.warning("Text-only AI response parse edilemedi: %s", text[:1000])
-            return None
-        return {
-            "Firma Adı": str(data.get("firma_adi", "")).strip(),
-            "Evrak Tipi": str(data.get("evrak_tipi", "Fatura")).strip() or "Fatura",
-            "Banka": "",
-            "Tutar": normalize_amount(data.get("tutar", 0)),
-            "Vade": normalize_date(data.get("vade", "")),
-            "Açıklama": str(data.get("aciklama", "")).strip()[:220],
-            "Çeki veren": "",
-            "Cirolu": "",
-            "Asıl borçlu": "",
-            "Kime verildi": "",
-            "Evrak No": str(data.get("evrak_no", "")).strip(),
-            "Döviz": normalize_currency(data.get("doviz", "TL")),
-            "Vergi Kimlik No": str(data.get("vergi_kimlik_no", "")).strip(),
-            "Ara Toplam": normalize_amount(data.get("ara_toplam", 0)),
-            "KDV Oranı": normalize_amount(data.get("kdv_orani", 0)),
-            "KDV Tutarı": normalize_amount(data.get("kdv_tutari", 0)),
-            "Durum": "Beklemede"
-        }
-    except Exception as e:
-        logging.exception(e)
-        return None
-
-def archive_invoice(image: Image.Image) -> str:
-    os.makedirs("invoices", exist_ok=True)
-    fname = datetime.now().strftime("%Y%m%d_%H%M%S") + ".png"
-    path = os.path.join("invoices", fname)
-    image.save(path)
-    return path
-
-# -------------------------
-# TEMPLATE EXCEL (Sayfa1 schema)
-# -------------------------
-def make_template_xlsx() -> bytes:
-    bio = BytesIO()
-    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-        pd.DataFrame(columns=CANON_COLS).to_excel(writer, index=False, sheet_name=WORKSHEET_NAME)
-        # küçük yönlendirme sayfası
-        tips = pd.DataFrame({
-            "Notlar": [
-                "Bu dosyayı indirip doldurun.",
-                "Sonra İşlem Merkezi > Excel Upload bölümünden yükleyin.",
-                "Belge tarihi formatı: 05.03.2026 (DD.MM.YYYY).",
-                "Para birimi: TL / USD / EUR gibi.",
-                "Ödeme durumu: Beklemede / Ödendi."
-            ]
-        })
-        tips.to_excel(writer, index=False, sheet_name="README")
-    return bio.getvalue()
-def read_template_xlsx(uploaded_file) -> pd.DataFrame:
-    xls = pd.ExcelFile(uploaded_file)
-    sheet = WORKSHEET_NAME if WORKSHEET_NAME in xls.sheet_names else xls.sheet_names[0]
-    dfu = pd.read_excel(xls, sheet)
-    return normalize_sheet(dfu)
-# -------------------------
-# UI HELPERS
-# -------------------------
-def kpi(label, value, delta=None, help_text=None):
-    """KPI kutusu: tek markdown ile render (HTML wrapper sorunlarını önler)."""
-    caption = label if not help_text else f"{label} · {help_text}"
-    delta_html = f"<div class='muted' style='margin-top:6px'>{delta}</div>" if delta is not None else ""
-    st.markdown(
-        f"""
-        <div class="kpi">
-          <div class="kpi-cap">{caption}</div>
-          <div class="kpi-val">{value}</div>
-          {delta_html}
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-def card_header(title: str, badge: str | None = None, subtitle: str | None = None):
-    """Kart başlığı: tek render (duplicate yok)."""
-    badge_html = f"<span class='badge'>{badge}</span>" if badge else ""
-    subtitle_html = f"<div class='muted' style='margin-top:6px'>{subtitle}</div>" if subtitle else ""
-    line_html = "<div class='accent-line'></div>" if subtitle else ""
-    st.markdown(
-        f"""
-        <div class="card-head">
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
-            <h3 style="margin:0;font-size:20px">{title}</h3>
-            {badge_html}
-          </div>
-          {subtitle_html}
-          {line_html}
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-def _build_href(**updates) -> str:
-    """Build a relative href keeping existing query params (theme, etc.)."""
-    params = _get_query_params()
-    # flatten possible list values (older API)
-    flat = {}
-    for k, v in params.items():
-        if isinstance(v, (list, tuple)):
-            flat[k] = v[0] if v else ""
-        else:
-            flat[k] = v
-    flat.update({k: v for k, v in updates.items() if v is not None})
-    # drop empties
-    flat = {k: str(v) for k, v in flat.items() if v is not None and str(v) != ""}
-    qs = urlencode(flat)
-    return f"?{qs}" if qs else ""
+        images = convert_from_bytes(file_bytes, dpi=dpi, first_page=1, last_page=max_pages)
+        for img in images:
+            texts.append(ocr_image(img))
+    except Exception:
+        return ""
+    return normalize_spaces("\n".join(texts))
 
 
-def render_scan_center(section_key: str = "scan", title: str = "Tarama → Otomatik Sheets'e ekle", show_bulk: bool = True):
-    card_header(title, badge="AI + OCR", subtitle="PDF/Foto yükle, AI alanları çıkarıp kaydetsin. Olmazsa manuel gir.")
-    types = ["png", "jpg", "jpeg", "pdf"]
-    single_tab, bulk_tab = st.tabs(["Tekli", "Toplu"]) if show_bulk else (st.container(), None)
 
-    with single_tab:
-        scan_file = st.file_uploader(
-            "Evrak yükle (PDF/Resim)",
-            type=types,
-            key=f"{section_key}_single_file"
-        )
-        c1, c2 = st.columns(2)
-        with c1:
-            do_ocr = st.checkbox("OCR kullan (varsa)", value=False, disabled=not OCR_ENABLED, key=f"{section_key}_ocr")
-        with c2:
-            archive = st.checkbox("Görseli arşivle", value=True, key=f"{section_key}_archive")
+def read_uploaded_file(uploaded_file, use_ocr: bool) -> tuple[str, str]:
+    file_bytes = uploaded_file.getvalue()
+    ext = uploaded_file.name.lower().rsplit(".", 1)[-1]
+    text = ""
+    method = ""
 
-        if scan_file and st.button("🧠 Tara & çıkar", width="stretch", key=f"{section_key}_run"):
-            with st.spinner("Evrak işleniyor..."):
-                payload = process_uploaded_invoice(scan_file, do_ocr=do_ocr)
-            st.session_state[f"_{section_key}_payload"] = payload
-
-        payload = st.session_state.get(f"_{section_key}_payload")
-        if payload and payload.get("source_name") == getattr(scan_file, "name", None):
-            result = apply_vendor_enrichment(payload.get("result"), raw_text=payload.get("ocr_text", ""))
-            image = payload.get("image")
-            raw_image = payload.get("raw_image")
-            ocr_text = payload.get("ocr_text", "")
-            qr_list = payload.get("qr_list", [])
-            if raw_image is not None or image is not None:
-                c1, c2 = st.columns(2)
-                with c1:
-                    if raw_image is not None:
-                        st.image(raw_image, caption="Orijinal", width="stretch")
-                with c2:
-                    if image is not None:
-                        st.image(image, caption="İyileştirilmiş", width="stretch")
-            if qr_list:
-                st.success("✅ QR bulundu")
-                st.code(qr_list[0])
-            if ocr_text.strip():
-                with st.expander("OCR / PDF Metni", expanded=False):
-                    st.text_area("Ham metin", ocr_text, height=180, key=f"{section_key}_ocr_view")
-            if not result:
-                st.warning("Tarama başarısız / düşük kalite. Aşağıdan manuel giriş yapabilirsin.")
-                if payload.get("error"):
-                    st.caption(payload.get("error"))
-            else:
-                st.success("✅ Alanlar çıkarıldı. Kaydetmeden önce gözden geçir.")
-                edited_result = render_invoice_review_form(result, key_prefix=f"{section_key}_review")
-                if st.button("💾 Sheets'e kaydet", width="stretch", key=f"{section_key}_save"):
-                    maybe_store_correction(payload.get("source_name", ""), result, edited_result, raw_text=ocr_text)
-                    new_row = build_invoice_record(edited_result, ocr_text=ocr_text, source_name=payload.get("source_name", ""))
-                    ok, err = save_single_record(new_row)
-                    if ok:
-                        if archive and image is not None:
-                            path = archive_invoice(image)
-                            st.info(f"Arşivlendi: {path}")
-                        st.success("Kaydedildi.")
-                        st.session_state.pop(f"_{section_key}_payload", None)
-                        st.rerun()
-                    else:
-                        st.error(f"Kaydedilemedi: {err}")
-
-    if show_bulk and bulk_tab is not None:
-        with bulk_tab:
-            bulk_files = st.file_uploader(
-                "Birden fazla PDF / görsel seç",
-                type=types,
-                accept_multiple_files=True,
-                key=f"{section_key}_bulk_files"
-            )
-            c1, c2 = st.columns(2)
-            with c1:
-                bulk_ocr = st.checkbox("Toplu işlemde OCR kullan", value=False, disabled=not OCR_ENABLED, key=f"{section_key}_bulk_ocr")
-            with c2:
-                bulk_archive = st.checkbox("Toplu işlemde görselleri arşivle", value=False, key=f"{section_key}_bulk_archive")
-            if bulk_files:
-                st.caption(f"Seçilen dosya: {len(bulk_files)}")
-            if bulk_files and st.button("📦 Toplu tara ve kaydet", width="stretch", key=f"{section_key}_bulk_run"):
-                rows = []
-                prepared_records = []
-                prepared_payloads = []
-                progress = st.progress(0)
-                total_files = max(len(bulk_files), 1)
-                for i, uf in enumerate(bulk_files, start=1):
-                    try:
-                        file_bytes = uf.getvalue() if hasattr(uf, "getvalue") else uf.read()
-                    except Exception:
-                        try:
-                            uf.seek(0)
-                        except Exception:
-                            pass
-                        file_bytes = uf.read()
-                    payload = process_uploaded_invoice_bytes(file_bytes, source_name=getattr(uf, "name", ""), file_type=getattr(uf, "type", "") or "", do_ocr=bulk_ocr)
-                    result = apply_vendor_enrichment(payload.get("result"), raw_text=payload.get("ocr_text", ""))
-                    result = sanitize_bulk_result(result, raw_text=payload.get("ocr_text", ""))
-                    if result:
-                        row = build_invoice_record(result, ocr_text=payload.get("ocr_text", ""), source_name=payload.get("source_name", ""))
-                        prepared_records.append(row)
-                        prepared_payloads.append(payload)
-                        rows.append({"dosya": payload.get("source_name", ""), "durum": "Hazır", "firma": row.get("firma_adi", ""), "tutar": row.get("genel_toplam", 0), "tarih": row.get("belge_tarihi", ""), "mesaj": ""})
-                    else:
-                        rows.append({"dosya": payload.get("source_name", ""), "durum": "Çözümlenemedi", "firma": "", "tutar": "", "tarih": "", "mesaj": payload.get("error", "Veri çıkarılamadı")})
-                    progress.progress(i / total_files)
-                ok, err = save_many_records(prepared_records) if prepared_records else (True, "")
-                success_count = len(prepared_records) if ok else 0
-                fail_count = len(bulk_files) - success_count
-                if ok and bulk_archive:
-                    for payload in prepared_payloads:
-                        if payload.get("image") is not None:
-                            try:
-                                archive_invoice(payload.get("image"))
-                            except Exception:
-                                pass
-                if ok:
-                    for r in rows:
-                        if r.get("durum") == "Hazır":
-                            r["durum"] = "Kaydedildi"
-                else:
-                    for r in rows:
-                        if r.get("durum") == "Hazır":
-                            r["durum"] = "Kaydedilemedi"
-                            r["mesaj"] = err
-                st.success(f"Toplu işlem bitti. Başarılı: {success_count} · Hatalı: {fail_count}")
-                if rows:
-                    st.dataframe(pd.DataFrame(rows), width="stretch", height=320)
-
-# -------------------------
-# SIDEBAR (menu + settings)
-# -------------------------
-# -------------------------
-with st.sidebar:
-    st.markdown("### 🏦 Finans")
-    # Theme toggle
-    theme_choice = st.radio(
-        "",
-        ["☀️ Light", "🌙 Dark"],
-        horizontal=True,
-        label_visibility="collapsed",
-        index=0 if st.session_state.theme_mode == "Light" else 1,
-        key="theme_choice_radio",
-    )
-    theme_choice_clean = "Light" if theme_choice.startswith("☀️") else "Dark"
-    if theme_choice_clean != st.session_state.theme_mode:
-        st.session_state.theme_mode = theme_choice_clean
-        _set_query_params(theme="dark" if theme_choice_clean == "Dark" else "light")
-        st.rerun()
-    inject_theme_css(st.session_state.theme_mode)
-    with st.container(border=True):
-        st.markdown("<div class='flow-panel-marker'></div>", unsafe_allow_html=True)
-        st.markdown(f"**Kullanıcı:** Kurter  \\n**Yetki:** {ROLE}")
-    menu = st.radio(
-        "",
-        ["Dashboard", "Hızlı Tarama", "İşlem Merkezi", "AI Evrak Analizi", "AI CFO Chat"],
-        label_visibility="collapsed",
-        key="menu_radio",
-    )
-    with st.expander("Ayarlar", expanded=False):
-        adat_rate = st.number_input("Adat Faizi %", value=39.75) / 100
-    st.divider()
-    if st.button("🧹 Cache temizle"):
-        st.cache_data.clear()
-        st.success("Cache temizlendi.")
-        st.rerun()
-# -------------------------
-# LOAD DATA
-# -------------------------
-df = load_data()
-usd, eur = get_fx()
-dfx = compute_tl(df, usd, eur)
-with st.sidebar:
-    with st.expander("🛠️ Google Sheets Debug"):
-        st.write("Okunan satır sayısı:", len(df) if df is not None else 0)
-        st.write("Kolonlar:", list(df.columns) if df is not None and not df.empty else [])
-        st.code(st.session_state.get("_gsheets_last_error", "Yok"))
-        if st.button("🧪 Sheets yazma testi", key="write_test_btn"):
-            ok, err = run_write_test_record()
-            if ok:
-                st.success("Test satırı yazıldı.")
-                st.rerun()
-            else:
-                st.error(f"Yazma testi başarısız: {err}")
-# -------------------------
-# DASHBOARD
-# -------------------------
-if menu == "Dashboard":
-    st.title("📊 Finans Dashboard")
-    st.markdown("<div class='muted'>Nakit riskini ve vade dağılımını hızlı gör.</div>", unsafe_allow_html=True)
-    st.markdown("<div class='accent-line'></div>", unsafe_allow_html=True)
-    if df.empty:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.warning("Google Sheets verisi okunamadı veya boş. Sheet paylaşımı ve secrets formatını kontrol edin.")
-        st.markdown("</div>", unsafe_allow_html=True)
-        st.stop()
-    # ---- Filter Bar
-    st.markdown("<div class='card-soft'>", unsafe_allow_html=True)
-    f1, f2, f3, f4, f5 = st.columns([1.4, 1, 1, 1, 1])
-    with f1:
-        search = st.text_input("🔎 Firma ara", placeholder="örn: X FİRMASI")
-    with f2:
-        only_open = st.selectbox("Durum", ["Hepsi", "Beklemede", "Ödendi", "Takas"], index=0)
-    with f3:
-        currency_view = st.selectbox("Gösterim", ["TL", "Orijinal"], index=0)
-    with f4:
-        horizon = st.selectbox("Vade Ufku", ["Hepsi", "Geciken", "0-7", "8-30", "31-90", "90+"], index=0)
-    with f5:
-        base_cash = st.number_input("Başlangıç Nakit (₺)", value=0.0, step=10000.0)
-    st.markdown("</div>", unsafe_allow_html=True)
-    data = dfx.copy()
-    if search.strip():
-        data = data[data["firma_adi"].astype(str).str.contains(search, case=False, na=False)]
-    if only_open != "Hepsi":
-        data = data[data["odeme_durumu"].astype(str).str.strip().str.lower() == only_open.lower()]
-    today = pd.Timestamp(datetime.now().date())
-    data["days_to_due"] = (data["Belge_Date"] - today).dt.days
-    d = data["days_to_due"].fillna(10**9)
-    if horizon == "Geciken":
-        data = data[d < 0]
-    elif horizon == "0-7":
-        data = data[(d >= 0) & (d <= 7)]
-    elif horizon == "8-30":
-        data = data[(d >= 8) & (d <= 30)]
-    elif horizon == "31-90":
-        data = data[(d >= 31) & (d <= 90)]
-    elif horizon == "90+":
-        data = data[d >= 91]
-    if currency_view == "TL":
-        amt_col = "Tutar_TL"
-        suffix = "₺"
+    if ext == "pdf":
+        text = extract_pdf_text(file_bytes)
+        method = "pdf_text"
+        if use_ocr and (not text or len(text) < 80):
+            ocr_text = ocr_pdf(file_bytes)
+            if len(ocr_text) > len(text):
+                text = ocr_text
+                method = "ocr_pdf"
     else:
-        amt_col = "genel_toplam"
-        suffix = ""
-    valid = data[data["Belge_Date"].notnull()].copy()
-    valid["days_to_due"] = (valid["Belge_Date"] - today).dt.days
-    total = float(valid[amt_col].sum()) if not valid.empty else 0.0
-    overdue = float(valid.loc[valid["days_to_due"] < 0, amt_col].sum()) if not valid.empty else 0.0
-    due7 = float(valid.loc[(valid["days_to_due"] >= 0) & (valid["days_to_due"] <= 7), amt_col].sum()) if not valid.empty else 0.0
-    due30 = float(valid.loc[(valid["days_to_due"] > 7) & (valid["days_to_due"] <= 30), amt_col].sum()) if not valid.empty else 0.0
-    if not valid.empty and float(valid[amt_col].sum()) > 0:
-        weighted = float((valid[amt_col] * valid["days_to_due"]).sum())
-        avg_days = weighted / float(valid[amt_col].sum())
-        avg_date = today + timedelta(days=int(avg_days))
-        adat_cost = (weighted * adat_rate) / 365
-    else:
-        avg_date = today
-        adat_cost = 0.0
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
-    with k1: kpi("Toplam Borç", f"{total:,.0f} {suffix}", help_text="Vade tarihli kayıtlar")
-    with k2: kpi("🔴 Geciken", f"{overdue:,.0f} {suffix}")
-    with k3: kpi("🟠 0-7 gün", f"{due7:,.0f} {suffix}")
-    with k4: kpi("🟡 8-30 gün", f"{due30:,.0f} {suffix}")
-    with k5: kpi("⏳ Ortalama Vade", avg_date.strftime("%d.%m.%Y"))
-    with k6: kpi("💸 Adat Yükü", f"{adat_cost:,.0f} ₺", help_text=f"Faiz %{adat_rate*100:.2f}")
-    st.markdown("---")
-    left, right = st.columns([1.35, 1])
-    with left:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        card_header("📅 Ödeme Takvimi", badge="Vade bazlı", subtitle="Yaklaşan ödemeleri tek bakışta gör.")
-        if valid.empty:
-            st.info("Vade tarihi olan kayıt yok.")
-        else:
-            pay = valid.groupby("Belge_Date")[amt_col].sum().reset_index()
-            fig = px.bar(pay, x="Belge_Date", y=amt_col)
-            st.plotly_chart(fig, width="stretch")
-        st.markdown("</div>", unsafe_allow_html=True)
-    with right:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        card_header("🧨 Risk Dağılımı", badge="Segment", subtitle="Geciken / yaklaşan / ileri vadeler.")
-        if valid.empty:
-            st.info("Risk dağılımı için veri yok.")
-        else:
-            bins = pd.cut(
-                valid["days_to_due"],
-                bins=[-10**6, -1, 7, 30, 90, 10**6],
-                labels=["Geciken", "0-7", "8-30", "31-90", "90+"]
-            )
-            risk = valid.groupby(bins, observed=False)[amt_col].sum().reset_index()
-            risk.columns = ["Risk", "Tutar"]
-            fig2 = px.pie(risk, names="Risk", values="Tutar", hole=0.55)
-            st.plotly_chart(fig2, width="stretch")
-        st.markdown("</div>", unsafe_allow_html=True)
-    st.markdown("---")
-    a, b = st.columns([1, 1])
-    with a:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        card_header("🏢 İlk 10 Firma", badge="Top", subtitle="Toplam tutara göre sıralı.")
-        if valid.empty:
-            st.info("Veri yok.")
-        else:
-            top = valid.groupby("firma_adi")[amt_col].sum().sort_values(ascending=False).head(10).reset_index()
-            fig3 = px.bar(top, x="firma_adi", y=amt_col)
-            st.plotly_chart(fig3, width="stretch")
-        st.markdown("</div>", unsafe_allow_html=True)
-    with b:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        card_header("📉 Nakit Akışı (30/60/90)", badge="Projeksiyon", subtitle="Vade bazlı toplam çıkış ve bakiye.")
-        if valid.empty:
-            st.info("Projeksiyon için vade tarihi olan kayıt yok.")
-        else:
-            proj = compute_tl(valid, usd, eur)
-            proj = proj[proj["Belge_Date"].notnull()].copy()
-            proj = proj.groupby("Belge_Date")["Tutar_TL"].sum().reset_index()
-            proj = proj.sort_values("Belge_Date")
-            end = today + timedelta(days=90)
-            days = pd.date_range(today, end, freq="D")
-            timeline = pd.DataFrame({"date": days})
-            proj = proj.rename(columns={"Belge_Date": "date", "Tutar_TL": "outflow"})
-            timeline = timeline.merge(proj, on="date", how="left").fillna({"outflow": 0.0})
-            timeline["balance"] = float(base_cash) - timeline["outflow"].cumsum()
-            balance_map = timeline.set_index("date")["balance"].to_dict()
-            bal30 = float(balance_map.get(today + timedelta(days=30), timeline["balance"].iloc[-1] if not timeline.empty else float(base_cash)))
-            bal60 = float(balance_map.get(today + timedelta(days=60), timeline["balance"].iloc[-1] if not timeline.empty else float(base_cash)))
-            bal90 = float(balance_map.get(today + timedelta(days=90), timeline["balance"].iloc[-1] if not timeline.empty else float(base_cash)))
-            m1, m2, m3 = st.columns(3)
-            m1.metric("30 gün", f"{bal30:,.0f} ₺")
-            m2.metric("60 gün", f"{bal60:,.0f} ₺")
-            m3.metric("90 gün", f"{bal90:,.0f} ₺")
-            fig4 = px.line(timeline, x="date", y="balance")
-            st.plotly_chart(fig4, width="stretch")
-        st.markdown("</div>", unsafe_allow_html=True)
-    st.markdown("---")
-    c1, c2 = st.columns([1.25, 1])
-    with c1:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        card_header("⚠️ En Riskli Kalemler", badge="Öncelik", subtitle="Gecikene en yakın 15 kayıt.")
-        if valid.empty:
-            st.info("Riskli kalem yok.")
-        else:
-            risk_table = valid.sort_values("days_to_due").head(15)
-            show_cols = ["firma_adi", "evrak_tipi", "belge_tarihi", "days_to_due", "Tutar_TL", "para_birimi", "odeme_durumu", "evrak_no", "aciklama"]
-            st.dataframe(risk_table[show_cols], width="stretch", height=420)
-        st.markdown("</div>", unsafe_allow_html=True)
-    with c2:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        card_header("🧠 AI CFO", badge="Analiz", subtitle="Filtreleri ayarladıktan sonra çalıştır.")
-        if st.button("🧠 AI CFO Analizi Yap", width="stretch"):
-            with st.spinner("AI analiz ediyor..."):
-                sample = compute_tl(data, usd, eur).head(80).to_dict()
-                prompt = f"""
-Sen deneyimli bir CFO'sun.
-Aşağıdaki borç tablosunu analiz et ve kısa/öz Türkçe rapor üret:
-- Özet risk (geciken, 0-7, 8-30, 31-90, 90+)
-- Öncelikli ödeme listesi (ilk 5)
-- Nakit yönetimi önerisi
-- Faiz/adat etkisi (faiz {adat_rate*100:.2f}%)
-VERİ:
-{sample}
-"""
-                try:
-                    resp = model.generate_content(prompt)
-                    st.markdown(resp.text)
-                except Exception as e:
-                    st.error(f"AI hata: {e}")
-        st.markdown("</div>", unsafe_allow_html=True)
-# -------------------------
-# İŞLEM MERKEZİ (4 kutu)
-# -------------------------
-elif menu == "Hızlı Tarama":
-    st.title("⚡ Hızlı Tarama")
-    st.markdown("<div class='muted'>En sık kullanılan akış: PDF / foto yükle, tekli veya toplu şekilde doğrudan Sheets'e ekle.</div>", unsafe_allow_html=True)
-    st.markdown("<div class='accent-line'></div>", unsafe_allow_html=True)
-    render_scan_center(section_key="sidebar_scan", title="Hızlı Tarama → Otomatik Sheets'e ekle", show_bulk=True)
+        if Image is None:
+            raise RuntimeError("PIL bulunamadı. Görsel işlenemiyor.")
+        image = Image.open(BytesIO(file_bytes))
+        if use_ocr:
+            text = ocr_image(image)
+            method = "ocr_image"
+    return normalize_spaces(text), method
 
-elif menu == "İşlem Merkezi":
-    # --- Hero header ---
-    st.markdown(
-        """
-        <div class="hero">
-          <div>
-            <h1>İşlem Merkezi</h1>
-            
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-    # --- Flow selector (NO navigation; stays in same Streamlit session) ---
-    flow_defs = [
-        ("template", "📄  Şablon indir", "Şablon", "Excel’i indir, offline doldur."),
-        ("upload",    "⬆️  Upload & işle", "Import", "Yükle, önizle, Sheets’e aktar."),
-        ("sheets",    "🟩  Sheets’te devam", "Live", "Google Sheets’i aynı sekmede aç."),
-        ("scan",      "📷  Tara & ekle", "AI+OCR", "PDF/Foto → alan çıkar → Sheets."),
-    ]
-    # Map internal flow keys to numbered titles used in the panel header/description
-    flow_map = {
-        "template": "1) Şablon indir",
-        "upload": "2) Upload & işle",
-        "sheets": "3) Sheets’te devam",
-        "scan": "4) Tara & ekle",
+
+
+def parse_seller(text: str) -> str:
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    stop_words = ("E-FATURA", "E-ARŞİV", "SAYIN", "FATURA NO", "FATURA TARİHİ")
+    seller_lines = []
+    for ln in lines[:12]:
+        up = ln.upper()
+        if any(sw in up for sw in stop_words):
+            break
+        seller_lines.append(ln)
+        if len(seller_lines) >= 3:
+            break
+    return seller_lines[0] if seller_lines else ""
+
+
+
+def parse_buyer(text: str) -> str:
+    m = re.search(r"SAYIN\s*\n+(.+)", text, re.IGNORECASE)
+    if m:
+        line = m.group(1).strip()
+        line = line.split("\n")[0].strip()
+        return line
+    lines = text.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.strip().upper() == "SAYIN" and i + 1 < len(lines):
+            return lines[i + 1].strip()
+    return ""
+
+
+
+def parse_product_summary(text: str) -> str:
+    start_markers = ["Malzeme /", "Malzeme/Hizmet", "Açıklaması", "Açıklamalar"]
+    end_markers = ["Mal / Hizmet Toplam", "Mal/Hizmet Toplam", "Ödenecek Tutar", "Vergiler Dahil Toplam"]
+    start_idx = -1
+    for marker in start_markers:
+        idx = text.find(marker)
+        if idx != -1:
+            start_idx = idx
+            break
+    if start_idx == -1:
+        return ""
+    chunk = text[start_idx:]
+    end_idx = len(chunk)
+    for marker in end_markers:
+        idx = chunk.find(marker)
+        if idx != -1:
+            end_idx = min(end_idx, idx)
+    chunk = chunk[:end_idx]
+    lines = [ln.strip() for ln in chunk.splitlines() if ln.strip()]
+    noise = {
+        "Sıra", "No", "Barkod", "Miktar", "Birim Fiyat", "İskonto", "KDV", "Oranı",
+        "Tutarı", "Diğer", "Vergiler", "Malzeme /", "Hizmet Kodu", "Açıklamalar"
     }
-    # Persist selection in session_state (default = upload if user came from elsewhere)
-    if "op_flow" not in st.session_state:
-        st.session_state.op_flow = "upload"
-    # Horizontal radio styled as big cards via CSS (.flow-radio label)
-    flow_labels = [d[1] for d in flow_defs]
-    flow_keys   = [d[0] for d in flow_defs]
-    default_idx = flow_keys.index(st.session_state.op_flow) if st.session_state.op_flow in flow_keys else 0
-    picked_label = st.radio(
-        "",
-        flow_labels,
-        index=default_idx,
-        horizontal=True,
-        label_visibility="collapsed",
-        key="flow_radio_pick",
-    )
-    picked_key = flow_keys[flow_labels.index(picked_label)]
-    if picked_key != st.session_state.op_flow:
-        st.session_state.op_flow = picked_key
-        st.session_state._scroll_flow_panel = True
-    step = flow_map.get(st.session_state.op_flow, "2) Upload & işle")
-    step_desc = {
-        "1) Şablon indir": "Excel şablonunu indir, offline doldur.",
-        "2) Upload & işle": "Doldurduğun Excel’i yükle, önizle, Sheets’e aktar.",
-        "3) Sheets’te devam": "Google Sheets’i aç, doğrudan orada düzenle.",
-        "4) Tara & ekle": "PDF/Foto yükle → alanları çıkar → Sheets’e ekle (olmazsa manuel gir).",
+    cleaned = []
+    for ln in lines:
+        if ln in noise:
+            continue
+        if re.fullmatch(r"[%\d\.,TLAdet]+", ln.replace(" ", "")):
+            continue
+        cleaned.append(ln)
+    joined = " | ".join(cleaned[:4])
+    return joined[:250]
+
+
+
+def parse_invoice_text(text: str, source_name: str = "") -> dict:
+    row = {
+        "kaynak_dosya": source_name,
+        "fatura_no": find_value_after_label(text, FIELD_LABELS["invoice_no"]),
+        "fatura_tarihi": normalize_date(find_value_after_label(text, FIELD_LABELS["invoice_date"])),
+        "siparis_no": find_value_after_label(text, FIELD_LABELS["order_no"]),
+        "siparis_tarihi": normalize_date(find_value_after_label(text, FIELD_LABELS["order_date"])),
+        "ettn": find_value_after_label(text, FIELD_LABELS["ettn"], multiline=True).splitlines()[0].strip() if find_value_after_label(text, FIELD_LABELS["ettn"], multiline=True) else "",
+        "satici": parse_seller(text),
+        "alici": parse_buyer(text),
+        "urun_ozeti": parse_product_summary(text),
+        "ara_toplam": 0.0,
+        "kdv_tutari": 0.0,
+        "odenecek_tutar": 0.0,
+        "ham_metin": text,
     }
-    st.markdown(f"<div class='muted' style='margin-top:0px;margin-bottom:12px'>{step_desc.get(step,'')}</div>", unsafe_allow_html=True)
-    # Smooth scroll to panel when a flow is picked (no URL navigation; no new tab; no re-auth)
-    if st.session_state.get("_scroll_flow_panel"):
-        components.v1.html(
-            """<script>
-            (function(){
-              try{
-                const el = document.getElementById('flow-panel');
-                if(el){ el.scrollIntoView({behavior:'smooth', block:'start'}); }
-              }catch(e){}
-            })();
-            </script>""",
-            height=0,
-        )
-        st.session_state._scroll_flow_panel = False
-    # --- Content area ---
-    st.markdown("<div id='flow-panel'></div>", unsafe_allow_html=True)
-    with st.container(border=True):
-        if step == "1) Şablon indir":
-            card_header("Şablon indir", badge="Şablon", subtitle="Excel’i indir, offline doldur, sonra upload et.")
-            st.download_button(
-                "📥 Taslağı indir (.xlsx)",
-                data=make_template_xlsx(),
-                file_name="finans_sablon.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                width="stretch"
-            )
-            st.markdown("<div class='muted'>Sheet adı: <b>Sayfa1</b>. Kolonlar otomatik normalize edilir.</div>", unsafe_allow_html=True)
-        elif step == "2) Upload & işle":
-            card_header("Excel Upload → Google Sheets'e işle", badge="Import", subtitle="Yükle, önizle ve aktar.")
-            up = st.file_uploader("Excel yükle (.xlsx)", type=["xlsx"], key="upl_xlsx")
-            mode = st.selectbox("Aktarım modu", ["Ekle (append)", "Yerine yaz (overwrite)"], index=0)
-            if up:
-                try:
-                    incoming = read_template_xlsx(up)
-                    incoming_view = incoming.drop(columns=["Belge_Date"], errors="ignore")
-                    st.markdown("<div class='muted'>Önizleme (ilk 20 satır):</div>", unsafe_allow_html=True)
-                    st.dataframe(incoming_view.head(20), width="stretch", height=260)
-                    nonblank = incoming.copy()
-                    mask_blank = (
-                        nonblank["firma_adi"].astype(str).str.strip().eq("") &
-                        (pd.to_numeric(nonblank["genel_toplam"], errors="coerce").fillna(0) == 0) &
-                        nonblank["belge_tarihi"].astype(str).str.strip().eq("")
-                    )
-                    nonblank = nonblank.loc[~mask_blank].copy()
-                    st.markdown(
-                        f"<div class='muted'>Yüklü satır: <b>{len(incoming)}</b> · Boş sayılan satır hariç: <b>{len(nonblank)}</b></div>",
-                        unsafe_allow_html=True
-                    )
-                    if st.button("✅ Google Sheets'e aktar", width="stretch", key="btn_import"):
-                        if mode.startswith("Yerine"):
-                            out = normalize_sheet(nonblank.drop(columns=["Belge_Date"], errors="ignore"))
-                        else:
-                            base = df.copy().drop(columns=["Belge_Date"], errors="ignore")
-                            out = pd.concat([base, nonblank.drop(columns=["Belge_Date"], errors="ignore")], ignore_index=True)
-                            out = normalize_sheet(out)
-                        ok, err = save_data(out)
-                        if ok:
-                            st.success("Aktarıldı ve kaydedildi.")
-                            st.rerun()
-                        else:
-                            st.error(f"Kaydedilemedi: {err}")
-                except Exception as e:
-                    st.error(f"Excel okunamadı: {e}")
-        elif step == "3) Sheets’te devam":
-            card_header("Google Sheets'te devam et", badge="Live", subtitle="Sheet'i aç, doğrudan oradan düzenle.")
-            sheets_url = get_sheets_url()
-            if sheets_url:
-                st.link_button("🔗 Google Sheets'i aç", sheets_url, width="stretch")
-                st.markdown("<div class='muted'>Sheets'te düzenle — Dashboard otomatik yansır.</div>", unsafe_allow_html=True)
-            else:
-                st.warning("Sheets linki secrets içinde bulunamadı. `SHEETS_URL` ya da `connections.gsheets.spreadsheet` tanımlı olmalı.")
-        else:
-            card_header("Tarama → Otomatik Sheets'e ekle", badge="AI + OCR", subtitle="PDF/Foto yükle, AI alanları çıkarıp kaydetsin. Olmazsa manuel gir.")
-            types = ["png", "jpg", "jpeg", "pdf"]  # pdf'yi her zaman kabul et
-            scan_file = st.file_uploader("Evrak yükle (PDF/Resim)", type=types, key="scan_file")
-            do_ocr = st.checkbox("OCR kullan (varsa)", value=False, disabled=not OCR_ENABLED, key="scan_ocr")
-            archive = st.checkbox("Görseli arşivle", value=True, key="scan_archive")
-            if scan_file and st.button("🧠 Tara & çıkar", width="stretch", key="btn_scan"):
-                raw_image = None
-                ocr_text = ""
-                if scan_file.type == "application/pdf":
-                    pdf_bytes = scan_file.read()
-                    # 1) Eğer pdf2image varsa ilk sayfayı görsele çevir
-                    if PDF_ENABLED:
-                        try:
-                            raw_image = pdf_first_page_to_image(pdf_bytes, dpi=350)
-                        except Exception as e:
-                            st.error(f"PDF görsele çevrilemedi: {e}")
-                    # 2) pdf2image yoksa en azından metin çekmeye çalış (OCR/AI için)
-                    if raw_image is None:
-                        try:
-                            import PyPDF2
-                            reader = PyPDF2.PdfReader(BytesIO(pdf_bytes))
-                            extracted = []
-                            for p in reader.pages[:3]:
-                                t = p.extract_text() or ""
-                                if t.strip():
-                                    extracted.append(t)
-                            ocr_text = "\n".join(extracted)[:8000]
-                            if not ocr_text.strip():
-                                st.warning("PDF metni çıkarılamadı. Poppler (pdf2image) kurulu değilse tarama sınırlı olur.")
-                        except Exception:
-                            st.warning("PDF metni çıkarılamadı. Daha iyi tarama için poppler-utils (pdf2image) önerilir.")
-                else:
-                    try:
-                        raw_image = Image.open(scan_file).convert("RGB")
-                    except Exception as e:
-                        st.error(f"Görsel açılamadı: {e}")
-                if raw_image is not None:
-                    image = enhance_for_reading(raw_image)
-                    qr_list = decode_qr_opencv(raw_image) or decode_qr_opencv(image)
-                    if do_ocr:
-                        with st.spinner("OCR okunuyor..."):
-                            ocr_text = (ocr_text + "\n" + ocr_read(image)).strip()
-                    with st.spinner("AI alanları çıkarıyor..."):
-                        result = analyze_invoice(image, ocr_text=ocr_text, qr_list=qr_list)
-                    if result:
-                        st.success("✅ Alanlar çıkarıldı. Kaydetmeden önce gözden geçir.")
-                        st.session_state["_scan_result"] = result
-                        st.session_state["_scan_image"] = image
-                        st.session_state["_scan_ocr_text"] = ocr_text
-                        st.session_state["_scan_source_name"] = getattr(scan_file, "name", "")
-                    else:
-                        st.warning("Tarama başarısız / düşük kalite. Aşağıdan manuel giriş yapabilirsin.")
-                        st.session_state["_scan_result"] = None
-                        st.session_state["_scan_image"] = None
-                else:
-                    # Görsel yok (PDF->image yok) ama metin varsa, metinle dene
-                    if ocr_text.strip():
-                        with st.spinner("AI (metin) alanları çıkarıyor..."):
-                            result = analyze_invoice_text_only(ocr_text, qr_list=[])
-                        if result:
-                            st.success("✅ Alanlar çıkarıldı. Kaydetmeden önce gözden geçir.")
-                            st.session_state["_scan_result"] = result
-                            st.session_state["_scan_image"] = None
-                            st.session_state["_scan_ocr_text"] = ocr_text
-                            st.session_state["_scan_source_name"] = getattr(scan_file, "name", "")
-                        else:
-                            st.warning("Metinden alan çıkarılamadı. Manuel girişe geç.")
-                    else:
-                        st.warning("Tarama için görsel üretilemedi. Manuel girişe geç.")
-            # Existing quick edit block stays as-is (below)
-            result = st.session_state.get("_scan_result")
-            image = st.session_state.get("_scan_image")
-            if result:
-                st.divider()
-                st.markdown("<div class='muted'>Kaydetmeden önce bilgileri kontrol et:</div>", unsafe_allow_html=True)
-                edited_result = render_invoice_review_form(result, key_prefix="scan_review")
-                if st.button("💾 Sheets'e kaydet", width="stretch", key="btn_scan_save"):
-                    source_name = st.session_state.get("_scan_source_name", getattr(scan_file, "name", ""))
-                    scan_ocr_text = st.session_state.get("_scan_ocr_text", "")
-                    new_row = build_invoice_record(edited_result, ocr_text=scan_ocr_text, source_name=source_name)
-                    ok, err = save_single_record(new_row)
-                    if ok:
-                        if archive and image is not None:
-                            path = archive_invoice(image)
-                            st.info(f"Arşivlendi: {path}")
-                        st.success("Kaydedildi.")
-                        st.session_state["_scan_result"] = None
-                        st.session_state["_scan_image"] = None
-                        st.session_state["_scan_ocr_text"] = ""
-                        st.session_state["_scan_source_name"] = ""
-                        st.rerun()
-                    else:
-                        st.error(f"Kaydedilemedi: {err}")
-    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
-    with st.container(border=True):
-        card_header("Manuel giriş (fallback)", badge="Form", subtitle="Tarama olmazsa veya hızlı eklemek istersen.")
-        with st.expander("➕ Yeni kayıt ekle", expanded=False):
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                firma = st.text_input("Firma Adı", key="m_firma")
-                evrak_tipi = st.selectbox("Evrak Tipi", ["Fatura", "e-Fatura", "e-Arşiv", "Diğer"], index=0, key="m_tip")
-                evrak_no = st.text_input("Evrak No", key="m_no")
-            with c2:
-                belge_tarihi = st.text_input("Belge Tarihi (DD.MM.YYYY)", key="m_belge_tarihi")
-                genel_toplam = st.number_input("Genel Toplam", value=0.0, step=100.0, key="m_genel_toplam")
-                para_birimi = st.selectbox("Para Birimi", ["TL", "USD", "EUR"], index=0, key="m_para_birimi")
-            with c3:
-                vergi_kimlik_no = st.text_input("Vergi Kimlik No", key="m_vkn")
-                kategori = st.text_input("Kategori", key="m_kategori")
-                odeme_durumu = st.selectbox("Ödeme Durumu", ["Beklemede", "Ödendi"], index=0, key="m_odeme")
-            aciklama = st.text_input("Açıklama", key="m_ack")
-            if st.button("💾 Kaydet", width="stretch", key="m_save"):
-                new_row = build_invoice_record({
-                    "Firma Adı": firma,
-                    "Evrak Tipi": evrak_tipi,
-                    "Evrak No": evrak_no,
-                    "Vade": belge_tarihi,
-                    "Tutar": genel_toplam,
-                    "Döviz": para_birimi,
-                    "Vergi Kimlik No": vergi_kimlik_no,
-                    "Kategori": kategori,
-                    "Durum": odeme_durumu,
-                    "Açıklama": aciklama,
-                }, source_name="manuel_giris")
-                ok, err = save_single_record(new_row)
-                if ok:
-                    st.success("Kayıt eklendi.")
-                    st.rerun()
-                else:
-                    st.error(f"Kaydedilemedi: {err}")
-        st.divider()
-        st.subheader("📌 Mevcut Kayıtlar")
-        st.dataframe(df.drop(columns=["Belge_Date"], errors="ignore"), width="stretch", height=420)
-elif menu == "AI Evrak Analizi":
-    st.title("📄 AI Evrak Analizi")
-    st.markdown("<div class='muted'>Detaylı önizleme + OCR/QR + manuel düzeltme.</div>", unsafe_allow_html=True)
-    st.markdown("<div class='accent-line'></div>", unsafe_allow_html=True)
-    types = ["png", "jpg", "jpeg", "pdf"]
-    tab_single, tab_bulk = st.tabs(["Tek Evrak", "Toplu Evrak"]) 
-    with tab_single:
-        uploaded = st.file_uploader("Fatura yükle", type=types, key="ai_single_uploader")
-        if not uploaded:
-            st.info("Analiz için bir PDF veya görsel yükle.")
-        else:
-            do_ocr = st.checkbox("OCR kullan (varsa)", value=False, disabled=not OCR_ENABLED, key="detail_ocr")
-            archive = st.checkbox("Görseli arşivle", value=True, key="detail_archive")
-            if st.button("🧠 AI ile Analiz Et", width="stretch", key="btn_detail_ai"):
-                with st.spinner("Evrak işleniyor..."):
-                    payload = process_uploaded_invoice(uploaded, do_ocr=do_ocr)
-                st.session_state["_detail_payload"] = payload
-            payload = st.session_state.get("_detail_payload") if st.session_state.get("_detail_payload", {}).get("source_name") == getattr(uploaded, "name", "") else None
-            if payload:
-                raw_image = payload.get("raw_image")
-                image = payload.get("image")
-                ocr_text = payload.get("ocr_text", "")
-                qr_list = payload.get("qr_list", [])
-                result = apply_vendor_enrichment(payload.get("result"), raw_text=payload.get("ocr_text", ""))
-                c1, c2 = st.columns(2)
 
-                with c1:
-                    if raw_image is not None:
-                        card_header("Orijinal", badge="Preview")
-                        st.image(raw_image, width="stretch")
-                with c2:
-                    if image is not None:
-                        card_header("İyileştirilmiş", badge="AI/OCR")
-                        st.image(image, width="stretch")
-                if qr_list:
-                    st.success("✅ QR bulundu")
-                    st.write(qr_list[0])
-                if ocr_text.strip():
-                    st.text_area("OCR Metni", ocr_text, height=180, key="detail_ocr_view")
-                if not result:
-                    st.error(payload.get("error", "AI veri çıkaramadı."))
-                else:
-                    st.success("AI veriyi çıkardı.")
-                    st.json(result)
-                    st.subheader("✍️ Kaydetmeden önce düzelt")
-                    edited_result = render_invoice_review_form(result, key_prefix="detail_review")
-                    if st.button("💾 Google Sheets'e Kaydet", width="stretch", key="btn_detail_save"):
-                        new_row = build_invoice_record(edited_result, ocr_text=ocr_text, source_name=getattr(uploaded, "name", ""))
-                        ok, err = save_single_record(new_row)
-                        if ok:
-                            if archive and image is not None:
-                                path = archive_invoice(image)
-                                st.info(f"Arşivlendi: {path}")
-                            st.success("Kaydedildi.")
-                            st.session_state.pop("_detail_payload", None)
-                            st.rerun()
-                        else:
-                            st.error(f"Kaydedilemedi: {err}")
-    with tab_bulk:
-        st.markdown("<div class='muted'>E-arşiv / e-fatura portalından indirdiğin PDF'leri toplu seçip tek seferde işleyebilirsin.</div>", unsafe_allow_html=True)
-        bulk_files = st.file_uploader("Toplu evrak yükle", type=types, accept_multiple_files=True, key="ai_bulk_uploader")
-        bulk_ocr = st.checkbox("Toplu işlemde OCR kullan (varsa)", value=False, disabled=not OCR_ENABLED, key="bulk_ocr")
-        if bulk_files and st.button("📦 Toplu analiz et ve kaydet", width="stretch", key="btn_bulk_save"):
-            rows = []
-            success_count = 0
-            fail_count = 0
-            progress = st.progress(0)
-            for i, uf in enumerate(bulk_files, start=1):
-                payload = process_uploaded_invoice(uf, do_ocr=bulk_ocr)
-                result = apply_vendor_enrichment(payload.get("result"), raw_text=payload.get("ocr_text", ""))
-                result = sanitize_bulk_result(result, raw_text=payload.get("ocr_text", ""))
-                if result:
-                    row = build_invoice_record(result, ocr_text=payload.get("ocr_text", ""), source_name=payload.get("source_name", ""))
+    subtotal_raw = find_value_after_label(text, FIELD_LABELS["subtotal"])
+    vat_raw = find_value_after_label(text, FIELD_LABELS["vat_amount"])
+    total_raw = find_value_after_label(text, FIELD_LABELS["payable_total"])
 
-                    ok, err = save_single_record(row)
-                    if ok:
-                        success_count += 1
-                        rows.append({
-                            "dosya": payload.get("source_name", ""),
-                            "durum": "Kaydedildi",
-                            "firma": row.get("firma_adi", ""),
-                            "tutar": row.get("genel_toplam", 0),
-                            "tarih": row.get("belge_tarihi", ""),
-                            "mesaj": "",
-                        })
-                    else:
-                        fail_count += 1
-                        rows.append({
-                            "dosya": payload.get("source_name", ""),
-                            "durum": "Kaydedilemedi",
-                            "firma": "",
-                            "tutar": "",
-                            "tarih": "",
-                            "mesaj": err,
-                        })
-                else:
-                    fail_count += 1
-                    rows.append({
-                        "dosya": payload.get("source_name", ""),
-                        "durum": "Çözümlenemedi",
-                        "firma": "",
-                        "tutar": "",
-                        "tarih": "",
-                        "mesaj": payload.get("error", "Veri çıkarılamadı"),
-                    })
-                progress.progress(i / max(len(bulk_files), 1))
-            st.success(f"Toplu işlem bitti. Başarılı: {success_count} · Hatalı: {fail_count}")
-            if rows:
-                st.dataframe(pd.DataFrame(rows), width="stretch", height=320)
-# -------------------------
-# AI CFO CHAT
-# -------------------------
-elif menu == "AI CFO Chat":
-    st.title("🧠 AI CFO Chat")
-    st.markdown("<div class='muted'>Kısa ve net finans soruları sor. Cevaplar tablondan beslenir.</div>", unsafe_allow_html=True)
-    st.markdown("<div class='accent-line'></div>", unsafe_allow_html=True)
-    if df.empty:
-        st.warning("Önce Google Sheets verisi okunmalı.")
-        st.stop()
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    q = st.text_area("Soru", placeholder="örn: Önümüzdeki 30 gün nakit riskim nedir? En riskli firmalar hangileri?")
-    if st.button("Sor", width="stretch") and q.strip():
-        with st.spinner("AI düşünüyor..."):
-            sample = compute_tl(df, usd, eur).head(120).to_dict()
-            prompt = f"""
-Sen CFO'sun. Kısa ve net Türkçe cevap ver.
-Gerekirse madde madde yaz.
-SORU:
-{q}
-VERİ (ilk 120 kayıt):
-{sample}
-"""
+    row["ara_toplam"] = normalize_amount(subtotal_raw)
+    row["kdv_tutari"] = normalize_amount(vat_raw)
+    row["odenecek_tutar"] = normalize_amount(total_raw)
+
+    if not row["odenecek_tutar"]:
+        totals = re.findall(r"(\d{1,3}(?:[\.,]\d{3})*(?:[\.,]\d{2})?)\s*(?:TL|TRY|₺)", text, re.IGNORECASE)
+        if totals:
+            row["odenecek_tutar"] = normalize_amount(totals[-1])
+
+    if not row["fatura_tarihi"]:
+        m = re.search(r"(\d{2}[./-]\d{2}[./-]\d{4})", text)
+        if m:
+            row["fatura_tarihi"] = normalize_date(m.group(1))
+
+    return row
+
+
+
+def to_excel_bytes(df: pd.DataFrame) -> bytes:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Faturalar")
+    return output.getvalue()
+
+
+st.title("📄 Fatura Tara → Excel")
+st.caption("Tek işi var: faturayı tara, düz veriyi çıkar, Excel'e at.")
+
+with st.sidebar:
+    st.subheader("Ayarlar")
+    use_ocr = st.checkbox("OCR kullan", value=True, help="Metin katmanı olmayan PDF'lerde gerekli olabilir.")
+    keep_raw_text = st.checkbox("Ham metni Excel'e koy", value=False)
+
+uploaded_files = st.file_uploader(
+    "PDF / JPG / PNG faturaları yükle",
+    type=["pdf", "jpg", "jpeg", "png"],
+    accept_multiple_files=True,
+)
+
+if uploaded_files:
+    if st.button("Tara ve Excel hazırla", type="primary"):
+        rows = []
+        previews = []
+        progress = st.progress(0)
+        status = st.empty()
+
+        for idx, uf in enumerate(uploaded_files, start=1):
+            status.info(f"İşleniyor: {uf.name}")
             try:
-                resp = model.generate_content(prompt)
-                st.markdown(resp.text)
+                text, method = read_uploaded_file(uf, use_ocr=use_ocr)
+                row = parse_invoice_text(text, source_name=uf.name)
+                row["okuma_yontemi"] = method
+                row["tarama_zamani"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+                if not keep_raw_text:
+                    row.pop("ham_metin", None)
+                rows.append(row)
+                previews.append({
+                    "dosya": uf.name,
+                    "yontem": method,
+                    "fatura_no": row.get("fatura_no", ""),
+                    "fatura_tarihi": row.get("fatura_tarihi", ""),
+                    "satici": row.get("satici", ""),
+                    "odenecek_tutar": amount_to_text(row.get("odenecek_tutar", 0)),
+                })
             except Exception as e:
-                st.error(f"AI hata: {e}")
-    st.markdown("</div>", unsafe_allow_html=True)
+                rows.append({
+                    "kaynak_dosya": uf.name,
+                    "fatura_no": "",
+                    "fatura_tarihi": "",
+                    "satici": "",
+                    "alici": "",
+                    "urun_ozeti": "",
+                    "ara_toplam": 0.0,
+                    "kdv_tutari": 0.0,
+                    "odenecek_tutar": 0.0,
+                    "okuma_yontemi": "hata",
+                    "hata": str(e),
+                    "tarama_zamani": datetime.now().strftime("%d.%m.%Y %H:%M:%S"),
+                })
+            progress.progress(idx / len(uploaded_files))
+
+        status.success("Tarama tamamlandı")
+        df = pd.DataFrame(rows)
+
+        ordered_cols = [
+            "kaynak_dosya",
+            "fatura_no",
+            "fatura_tarihi",
+            "siparis_no",
+            "siparis_tarihi",
+            "ettn",
+            "satici",
+            "alici",
+            "urun_ozeti",
+            "ara_toplam",
+            "kdv_tutari",
+            "odenecek_tutar",
+            "okuma_yontemi",
+            "tarama_zamani",
+        ]
+        if keep_raw_text:
+            ordered_cols.append("ham_metin")
+        remaining = [c for c in df.columns if c not in ordered_cols]
+        df = df[[c for c in ordered_cols if c in df.columns] + remaining]
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Toplam dosya", len(df))
+        c2.metric("Fatura no bulunan", int(df["fatura_no"].astype(str).str.len().gt(0).sum()) if "fatura_no" in df.columns else 0)
+        c3.metric("Tutar bulunan", int(pd.to_numeric(df.get("odenecek_tutar", 0), errors="coerce").fillna(0).gt(0).sum()))
+
+        st.subheader("Önizleme")
+        st.dataframe(pd.DataFrame(previews), use_container_width=True)
+
+        st.subheader("Tam çıktı")
+        st.dataframe(df, use_container_width=True)
+
+        excel_bytes = to_excel_bytes(df)
+        st.download_button(
+            "Excel indir",
+            data=excel_bytes,
+            file_name=f"fatura_tarama_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+else:
+    st.info("Başlamak için bir veya birden fazla fatura yükle.")
