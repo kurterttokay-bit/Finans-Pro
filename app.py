@@ -1,5 +1,3 @@
-from corrections_memory import build_correction_record
-from json_utils import safe_json_loads
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -14,8 +12,137 @@ import plotly.express as px
 import os
 from urllib.parse import urlencode
 from io import BytesIO
-from invoice_normalizers import normalize_amount, normalize_currency, normalize_date
-from sheet_ops import read_sheet, append_row, replace_sheet, SHEET_COLUMNS
+
+# -------------------------
+# SAFE FALLBACK IMPORTS
+# -------------------------
+try:
+    from vendor_rules import enrich_invoice_fields
+except Exception:
+    def enrich_invoice_fields(data, raw_text="", corrections_df=None):
+        return data or {}
+
+try:
+    from corrections_memory import build_correction_record
+except Exception:
+    def build_correction_record(source_name="", raw_vendor="", corrected_vendor="", raw_category="", corrected_category="", raw_text="", note=""):
+        return {
+            "tarih": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "kaynak_dosya": source_name,
+            "ham_firma": raw_vendor,
+            "duzeltilmis_firma": corrected_vendor,
+            "ham_kategori": raw_category,
+            "duzeltilmis_kategori": corrected_category,
+            "ham_metin": raw_text,
+            "not": note,
+        }
+
+try:
+    from json_utils import safe_json_loads
+except Exception:
+    def safe_json_loads(text):
+        if not text:
+            return {}
+        text = str(text).strip()
+        try:
+            return json.loads(text)
+        except Exception:
+            match = re.search(r"\{[\s\S]*\}", text)
+            if match:
+                try:
+                    return json.loads(match.group(0))
+                except Exception:
+                    return {}
+            return {}
+
+try:
+    from invoice_normalizers import normalize_amount, normalize_currency, normalize_date
+except Exception:
+    def normalize_amount(value):
+        if value is None or value == "":
+            return 0.0
+        if isinstance(value, (int, float)):
+            return float(value)
+        s = str(value).strip()
+        s = s.replace("TL", "").replace("TRY", "").replace("₺", "").replace("%", "")
+        s = s.replace(" ", "")
+        if "," in s and "." in s:
+            if s.rfind(",") > s.rfind("."):
+                s = s.replace(".", "").replace(",", ".")
+            else:
+                s = s.replace(",", "")
+        elif "," in s:
+            s = s.replace(".", "").replace(",", ".")
+        try:
+            return float(s)
+        except Exception:
+            m = re.search(r"-?\d+(?:[\.,]\d+)?", s)
+            if not m:
+                return 0.0
+            return float(m.group(0).replace(",", "."))
+
+    def normalize_currency(value):
+        s = str(value or "TL").strip().upper()
+        mapping = {"TRY": "TL", "TRL": "TL", "₺": "TL", "$": "USD", "USDT": "USD", "€": "EUR"}
+        return mapping.get(s, s or "TL")
+
+    def normalize_date(value):
+        s = str(value or "").strip()
+        if not s:
+            return ""
+        for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(s, fmt).strftime("%d.%m.%Y")
+            except Exception:
+                pass
+        m = re.search(r"(\d{2})[./-](\d{2})[./-](\d{4})", s)
+        if m:
+            return f"{m.group(1)}.{m.group(2)}.{m.group(3)}"
+        return s
+
+try:
+    from sheet_ops import read_sheet, append_row, replace_sheet, SHEET_COLUMNS
+except Exception:
+    SHEET_COLUMNS = [
+        "kayit_tarihi", "belge_tarihi", "firma_adi", "evrak_tipi", "evrak_no",
+        "vergi_kimlik_no", "para_birimi", "ara_toplam", "kdv_orani", "kdv_tutari",
+        "genel_toplam", "kategori", "odeme_durumu", "aciklama", "ham_metin",
+        "kaynak_dosya", "created_at", "updated_at"
+    ]
+
+    def read_sheet(conn, worksheet=None):
+        try:
+            if worksheet:
+                return conn.read(worksheet=worksheet)
+            return conn.read()
+        except Exception:
+            return pd.DataFrame(columns=SHEET_COLUMNS)
+
+    def append_row(conn, record, worksheet=None):
+        try:
+            current = read_sheet(conn, worksheet=worksheet)
+            if current is None or getattr(current, "empty", True):
+                current = pd.DataFrame(columns=SHEET_COLUMNS)
+            updated = pd.concat([current, pd.DataFrame([record])], ignore_index=True)
+            if worksheet:
+                conn.update(worksheet=worksheet, data=updated)
+            else:
+                conn.update(data=updated)
+        except Exception as e:
+            raise e
+
+    def replace_sheet(conn, df, worksheet=None):
+        if worksheet:
+            conn.update(worksheet=worksheet, data=df)
+        else:
+            conn.update(data=df)
+
+# -------------------------
+# PAGE ROUTER
+# -------------------------
+if "page" not in st.session_state:
+    st.session_state.page = "home"
+
 # -------------------------
 # OPTIONAL LIBS (PDF / OCR)
 # -------------------------
@@ -441,7 +568,6 @@ def inject_theme_css(theme: str):
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.flow-panel-marker) {{
         animation: fadeUp .22s ease-out;
     }}
-    .tool-hub-note { color: {muted}; font-size: 14px; margin-top: -4px; margin-bottom: 14px; }
 </style>
     """
     st.markdown(css, unsafe_allow_html=True)
@@ -1379,43 +1505,6 @@ def card_header(title: str, badge: str | None = None, subtitle: str | None = Non
         """,
         unsafe_allow_html=True
     )
-def render_tool_hub(total_records: int, pending_count: int, today_amount: float):
-    st.markdown(
-        """
-        <div class="hero">
-          <div>
-            <h1>AI Muhasebe Araçları</h1>
-            <p>WhatsApp’tan gelen PDF faturaları yükle, alanları çıkar, Google Sheets veya Excel akışına hızla devam et.</p>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-    k1, k2, k3 = st.columns(3)
-    with k1:
-        kpi("Toplam Kayıt", f"{total_records:,}".replace(",", "."), help_text="Sheets'teki satırlar")
-    with k2:
-        kpi("Bekleyen", f"{pending_count:,}".replace(",", "."), help_text="Ödeme durumu Beklemede")
-    with k3:
-        kpi("Bugün Girilen", f"{today_amount:,.0f} ₺", help_text="Bugünkü belge toplamı")
-
-    cards = [
-        ("📄 Fatura Okuyucu", "PDF / foto yükle, tekli veya toplu şekilde anında işle.", "Fatura Okuyucu", "primary"),
-        ("🧩 İşlem Merkezi", "Şablon indir, Excel yükle, Sheets bağlantısına devam et.", "İşlem Merkezi", "secondary"),
-        ("🔎 AI Evrak Analizi", "Detaylı OCR, QR, görsel önizleme ve manuel düzeltme.", "AI Evrak Analizi", "secondary"),
-        ("🧠 AI CFO Chat", "Tablodaki verilere göre risk ve nakit sorularını sor.", "AI CFO Chat", "secondary"),
-    ]
-    cols = st.columns(4)
-    for col, (title, desc, target, badge) in zip(cols, cards):
-        with col:
-            with st.container(border=True):
-                st.markdown(f"**{title}**")
-                st.caption(desc)
-                btn_label = "Hemen Aç" if badge == "primary" else "Aç"
-                if st.button(btn_label, key=f"hub_{target}", use_container_width=True):
-                    st.session_state.menu_radio = target
-                    st.rerun()
-
 def _build_href(**updates) -> str:
     """Build a relative href keeping existing query params (theme, etc.)."""
     params = _get_query_params()
@@ -1586,7 +1675,7 @@ with st.sidebar:
         st.markdown(f"**Kullanıcı:** Kurter  \\n**Yetki:** {ROLE}")
     menu = st.radio(
         "",
-        ["Ana Sayfa", "Fatura Okuyucu", "İşlem Merkezi", "AI Evrak Analizi", "AI CFO Chat"],
+        ["Dashboard", "Hızlı Tarama", "İşlem Merkezi", "AI Evrak Analizi", "AI CFO Chat"],
         label_visibility="collapsed",
         key="menu_radio",
     )
@@ -1618,16 +1707,10 @@ with st.sidebar:
 # -------------------------
 # DASHBOARD
 # -------------------------
-if menu == "Ana Sayfa":
+if menu == "Dashboard":
     st.title("📊 Finans Dashboard")
     st.markdown("<div class='muted'>Nakit riskini ve vade dağılımını hızlı gör.</div>", unsafe_allow_html=True)
     st.markdown("<div class='accent-line'></div>", unsafe_allow_html=True)
-    pending_count = 0 if df.empty else int(df["odeme_durumu"].astype(str).str.strip().str.lower().eq("beklemede").sum())
-    today_str = datetime.now().strftime("%d.%m.%Y")
-    today_amount = 0.0 if df.empty else float(pd.to_numeric(df.loc[df["kayit_tarihi"].astype(str) == today_str, "genel_toplam"], errors="coerce").fillna(0).sum())
-    render_tool_hub(total_records=len(df), pending_count=pending_count, today_amount=today_amount)
-    st.markdown("---")
-    st.subheader("Canlı Finans Özeti")
     if df.empty:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.warning("Google Sheets verisi okunamadı veya boş. Sheet paylaşımı ve secrets formatını kontrol edin.")
@@ -1796,11 +1879,11 @@ VERİ:
 # -------------------------
 # İŞLEM MERKEZİ (4 kutu)
 # -------------------------
-elif menu == "Fatura Okuyucu":
-    st.title("📄 Fatura Okuyucu")
+elif menu == "Hızlı Tarama":
+    st.title("⚡ Hızlı Tarama")
     st.markdown("<div class='muted'>En sık kullanılan akış: PDF / foto yükle, tekli veya toplu şekilde doğrudan Sheets'e ekle.</div>", unsafe_allow_html=True)
     st.markdown("<div class='accent-line'></div>", unsafe_allow_html=True)
-    render_scan_center(section_key="sidebar_scan", title="Fatura Okuyucu → Otomatik Sheets'e ekle", show_bulk=True)
+    render_scan_center(section_key="sidebar_scan", title="Hızlı Tarama → Otomatik Sheets'e ekle", show_bulk=True)
 
 elif menu == "İşlem Merkezi":
     # --- Hero header ---
