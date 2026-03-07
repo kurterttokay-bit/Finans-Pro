@@ -1,10 +1,3 @@
-# -------------------------
-# PAGE ROUTER
-# -------------------------
-
-if "page" not in st.session_state:
-    st.session_state.page = "home"
-    
 from vendor_rules import enrich_invoice_fields
 from corrections_memory import build_correction_record
 from json_utils import safe_json_loads
@@ -449,6 +442,7 @@ def inject_theme_css(theme: str):
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.flow-panel-marker) {{
         animation: fadeUp .22s ease-out;
     }}
+    .tool-hub-note { color: {muted}; font-size: 14px; margin-top: -4px; margin-bottom: 14px; }
 </style>
     """
     st.markdown(css, unsafe_allow_html=True)
@@ -1386,6 +1380,43 @@ def card_header(title: str, badge: str | None = None, subtitle: str | None = Non
         """,
         unsafe_allow_html=True
     )
+def render_tool_hub(total_records: int, pending_count: int, today_amount: float):
+    st.markdown(
+        """
+        <div class="hero">
+          <div>
+            <h1>AI Muhasebe Araçları</h1>
+            <p>WhatsApp’tan gelen PDF faturaları yükle, alanları çıkar, Google Sheets veya Excel akışına hızla devam et.</p>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    k1, k2, k3 = st.columns(3)
+    with k1:
+        kpi("Toplam Kayıt", f"{total_records:,}".replace(",", "."), help_text="Sheets'teki satırlar")
+    with k2:
+        kpi("Bekleyen", f"{pending_count:,}".replace(",", "."), help_text="Ödeme durumu Beklemede")
+    with k3:
+        kpi("Bugün Girilen", f"{today_amount:,.0f} ₺", help_text="Bugünkü belge toplamı")
+
+    cards = [
+        ("📄 Fatura Okuyucu", "PDF / foto yükle, tekli veya toplu şekilde anında işle.", "Fatura Okuyucu", "primary"),
+        ("🧩 İşlem Merkezi", "Şablon indir, Excel yükle, Sheets bağlantısına devam et.", "İşlem Merkezi", "secondary"),
+        ("🔎 AI Evrak Analizi", "Detaylı OCR, QR, görsel önizleme ve manuel düzeltme.", "AI Evrak Analizi", "secondary"),
+        ("🧠 AI CFO Chat", "Tablodaki verilere göre risk ve nakit sorularını sor.", "AI CFO Chat", "secondary"),
+    ]
+    cols = st.columns(4)
+    for col, (title, desc, target, badge) in zip(cols, cards):
+        with col:
+            with st.container(border=True):
+                st.markdown(f"**{title}**")
+                st.caption(desc)
+                btn_label = "Hemen Aç" if badge == "primary" else "Aç"
+                if st.button(btn_label, key=f"hub_{target}", use_container_width=True):
+                    st.session_state.menu_radio = target
+                    st.rerun()
+
 def _build_href(**updates) -> str:
     """Build a relative href keeping existing query params (theme, etc.)."""
     params = _get_query_params()
@@ -1556,7 +1587,7 @@ with st.sidebar:
         st.markdown(f"**Kullanıcı:** Kurter  \\n**Yetki:** {ROLE}")
     menu = st.radio(
         "",
-        ["Dashboard", "Hızlı Tarama", "İşlem Merkezi", "AI Evrak Analizi", "AI CFO Chat"],
+        ["Ana Sayfa", "Fatura Okuyucu", "İşlem Merkezi", "AI Evrak Analizi", "AI CFO Chat"],
         label_visibility="collapsed",
         key="menu_radio",
     )
@@ -1588,10 +1619,16 @@ with st.sidebar:
 # -------------------------
 # DASHBOARD
 # -------------------------
-if menu == "Dashboard":
+if menu == "Ana Sayfa":
     st.title("📊 Finans Dashboard")
     st.markdown("<div class='muted'>Nakit riskini ve vade dağılımını hızlı gör.</div>", unsafe_allow_html=True)
     st.markdown("<div class='accent-line'></div>", unsafe_allow_html=True)
+    pending_count = 0 if df.empty else int(df["odeme_durumu"].astype(str).str.strip().str.lower().eq("beklemede").sum())
+    today_str = datetime.now().strftime("%d.%m.%Y")
+    today_amount = 0.0 if df.empty else float(pd.to_numeric(df.loc[df["kayit_tarihi"].astype(str) == today_str, "genel_toplam"], errors="coerce").fillna(0).sum())
+    render_tool_hub(total_records=len(df), pending_count=pending_count, today_amount=today_amount)
+    st.markdown("---")
+    st.subheader("Canlı Finans Özeti")
     if df.empty:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.warning("Google Sheets verisi okunamadı veya boş. Sheet paylaşımı ve secrets formatını kontrol edin.")
@@ -1760,11 +1797,11 @@ VERİ:
 # -------------------------
 # İŞLEM MERKEZİ (4 kutu)
 # -------------------------
-elif menu == "Hızlı Tarama":
-    st.title("⚡ Hızlı Tarama")
+elif menu == "Fatura Okuyucu":
+    st.title("📄 Fatura Okuyucu")
     st.markdown("<div class='muted'>En sık kullanılan akış: PDF / foto yükle, tekli veya toplu şekilde doğrudan Sheets'e ekle.</div>", unsafe_allow_html=True)
     st.markdown("<div class='accent-line'></div>", unsafe_allow_html=True)
-    render_scan_center(section_key="sidebar_scan", title="Hızlı Tarama → Otomatik Sheets'e ekle", show_bulk=True)
+    render_scan_center(section_key="sidebar_scan", title="Fatura Okuyucu → Otomatik Sheets'e ekle", show_bulk=True)
 
 elif menu == "İşlem Merkezi":
     # --- Hero header ---
