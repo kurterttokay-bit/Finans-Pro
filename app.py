@@ -1,4 +1,5 @@
 import json
+import importlib.util
 import re
 from datetime import datetime
 from pathlib import Path
@@ -9,8 +10,11 @@ import numpy as np
 import pandas as pd
 import pytesseract
 import streamlit as st
-from PIL import Image
-from streamlit_drawable_canvas import st_canvas
+from PIL import Image, ImageDraw
+
+CANVAS_AVAILABLE = importlib.util.find_spec("streamlit_drawable_canvas") is not None
+if CANVAS_AVAILABLE:
+    from streamlit_drawable_canvas import st_canvas
 
 TEMPLATE_DIR = Path("templates")
 EXPORT_DIR = Path("exports")
@@ -161,6 +165,43 @@ def empty_result_row() -> Dict[str, str]:
     return {field: "" for field in FIELD_NAMES}
 
 
+def draw_preview_boxes(base_image: Image.Image, rectangles: List[Dict]) -> Image.Image:
+    preview = base_image.convert("RGBA")
+    overlay = Image.new("RGBA", preview.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    for rect in rectangles:
+        x = max(0.0, float(rect.get("left", 0)))
+        y = max(0.0, float(rect.get("top", 0)))
+        w = max(1.0, float(rect.get("width", 1)))
+        h = max(1.0, float(rect.get("height", 1)))
+        draw.rounded_rectangle(
+            [x, y, x + w, y + h],
+            radius=8,
+            fill=(0, 180, 255, 85),
+            outline=(45, 212, 255, 255),
+            width=3,
+        )
+    return Image.alpha_composite(preview, overlay).convert("RGB")
+
+
+def normalize_canvas_objects(objects: List[Dict]) -> List[Dict]:
+    rectangles: List[Dict] = []
+    for obj in objects:
+        if obj.get("type") != "rect":
+            continue
+        scale_x = float(obj.get("scaleX", 1.0))
+        scale_y = float(obj.get("scaleY", 1.0))
+        rectangles.append(
+            {
+                "left": float(obj.get("left", 0)),
+                "top": float(obj.get("top", 0)),
+                "width": max(1.0, float(obj.get("width", 1)) * scale_x),
+                "height": max(1.0, float(obj.get("height", 1)) * scale_y),
+            }
+        )
+    return rectangles
+
+
 # ---------------------- UI ----------------------
 st.set_page_config(page_title="PDF Şablon Öğretme ve Tarama", layout="wide")
 ensure_dirs()
@@ -181,22 +222,44 @@ with teach_tab:
             h, w = image_np.shape[:2]
 
             st.info("Mavi yarı saydam kutular çizin. Kutuları köşelerinden büyütüp küçültebilir, taşıyabilirsiniz.")
-            canvas_result = st_canvas(
-                fill_color="rgba(0, 180, 255, 0.25)",
-                stroke_width=2,
-                stroke_color="#2dd4ff",
-                background_image=image,
-                update_streamlit=True,
-                height=h,
-                width=w,
-                drawing_mode="rect",
-                key="canvas_teach",
-                display_toolbar=True,
-            )
 
-            objects = []
-            if canvas_result.json_data and canvas_result.json_data.get("objects"):
-                objects = [obj for obj in canvas_result.json_data["objects"] if obj.get("type") == "rect"]
+            objects: List[Dict] = []
+            if CANVAS_AVAILABLE:
+                canvas_result = st_canvas(
+                    fill_color="rgba(0, 180, 255, 0.25)",
+                    stroke_width=2,
+                    stroke_color="#2dd4ff",
+                    background_image=image,
+                    update_streamlit=True,
+                    height=h,
+                    width=w,
+                    drawing_mode="rect",
+                    key="canvas_teach",
+                    display_toolbar=True,
+                )
+                if canvas_result.json_data and canvas_result.json_data.get("objects"):
+                    objects = normalize_canvas_objects(canvas_result.json_data["objects"])
+            else:
+                st.warning(
+                    "`streamlit-drawable-canvas` kurulamadığı için çizim modu açılamadı. "
+                    "Aşağıdan kutu koordinatlarını elle düzenleyebilirsiniz."
+                )
+                box_count = st.number_input("Kutu sayısı", min_value=1, max_value=30, value=1, step=1)
+                manual_rows = []
+                for i in range(int(box_count)):
+                    c1, c2, c3, c4 = st.columns(4)
+                    with c1:
+                        x = st.number_input(f"K{i+1} X", min_value=0, max_value=max(w - 1, 1), value=min(i * 10, max(w - 50, 0)), key=f"mx_{i}")
+                    with c2:
+                        y = st.number_input(f"K{i+1} Y", min_value=0, max_value=max(h - 1, 1), value=min(i * 10, max(h - 50, 0)), key=f"my_{i}")
+                    with c3:
+                        rw = st.number_input(f"K{i+1} Genişlik", min_value=1, max_value=max(w, 1), value=min(180, max(w, 1)), key=f"mw_{i}")
+                    with c4:
+                        rh = st.number_input(f"K{i+1} Yükseklik", min_value=1, max_value=max(h, 1), value=min(60, max(h, 1)), key=f"mh_{i}")
+                    manual_rows.append({"left": x, "top": y, "width": rw, "height": rh})
+
+                objects = manual_rows
+                st.image(draw_preview_boxes(image, objects), caption="Manuel kutu önizleme", use_container_width=True)
 
             if objects:
                 st.markdown("### Kutulara hazır alan etiketi atayın")
