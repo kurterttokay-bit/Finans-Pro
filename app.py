@@ -1,5 +1,3 @@
-def enrich_invoice_fields(data):
-    return data
 from corrections_memory import build_correction_record
 from json_utils import safe_json_loads
 import streamlit as st
