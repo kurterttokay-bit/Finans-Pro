@@ -1,3 +1,10 @@
+# -------------------------
+# PAGE ROUTER
+# -------------------------
+
+if "page" not in st.session_state:
+    st.session_state.page = "home"
+    
 from vendor_rules import enrich_invoice_fields
 from corrections_memory import build_correction_record
 from json_utils import safe_json_loads
